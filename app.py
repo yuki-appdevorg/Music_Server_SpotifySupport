@@ -1,4 +1,3 @@
-
 import os
 import json
 import uuid
@@ -33,15 +32,14 @@ app.config['LOG_FILE'] = os.path.join(app.config['BASE_DIR'], 'server.log')
 
 app.secret_key = 'super_secret_key_change_me'
 
-# --- 認証情報 (変更してください) ---
+# --- 認証情報 ---
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD = '123456'
 
 # --- 【重要】Spotify API設定 ---
-# 取得したIDとSecretをここに貼り付けてください
-# 引用符 ' ' の中に入れてください
-SPOTIFY_CLIENT_ID = ''      # 例: 'ab12345...'
-SPOTIFY_CLIENT_SECRET = ''  # 例: 'cd67890...'
+# 取得したIDとSecretをここに入力してください
+SPOTIFY_CLIENT_ID = '' 
+SPOTIFY_CLIENT_SECRET = ''
 
 ALLOWED_EXTENSIONS_IMG = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'webm', 'mkv'}
@@ -276,11 +274,9 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
     logging.info(f"Start Spotify DL: {url}")
     try:
-        # Client ID/Secretのチェック
         if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-            raise Exception("Spotify Client ID/Secretが設定されていません。app.pyを確認してください。")
+            raise Exception("Spotify Client ID/Secretが設定されていません。")
 
-        # SpotDL初期化 (認証情報を使用)
         spotdl = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, user_auth=False, headless=True)
         
         try:
@@ -327,10 +323,18 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
                 
                 spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
-                downloaded_path = spotdl.download(song_obj)
+                
+                # ここを修正: タプル判定を追加
+                result = spotdl.download(song_obj)
+                
+                if result:
+                    # タプル判定 (song, path)
+                    if isinstance(result, tuple):
+                        _, path_obj = result
+                        dl_file = str(path_obj)
+                    else:
+                        dl_file = str(result)
 
-                if downloaded_path:
-                    dl_file = str(downloaded_path)
                     final_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
                     
                     subprocess.run([
