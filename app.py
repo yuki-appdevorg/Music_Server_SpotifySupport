@@ -29,17 +29,13 @@ app.config['INDEX_FILE'] = os.path.join(app.config['DATA_FOLDER'], 'index.json')
 app.config['UPLOAD_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_upload')
 app.config['SPOTDL_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_spotdl')
 app.config['LOG_FILE'] = os.path.join(app.config['BASE_DIR'], 'server.log')
+app.config['KEY_FILE'] = os.path.join(app.config['BASE_DIR'], 'spotify_key.txt') # キーファイル
 
 app.secret_key = 'super_secret_key_change_me'
 
 # --- 認証情報 ---
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD = '123456'
-
-# --- 【重要】Spotify API設定 ---
-# 取得したIDとSecretをここに入力してください
-SPOTIFY_CLIENT_ID = '' 
-SPOTIFY_CLIENT_SECRET = ''
 
 ALLOWED_EXTENSIONS_IMG = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'webm', 'mkv'}
@@ -67,6 +63,53 @@ for folder in [app.config['MUSIC_FOLDER'], app.config['IMAGES_FOLDER'], app.conf
 if not os.path.exists(app.config['INDEX_FILE']):
     with open(app.config['INDEX_FILE'], 'w', encoding='utf-8') as f:
         json.dump([], f)
+
+# --- Spotify APIキー読み込み ---
+SPOTIFY_CLIENT_ID = None
+SPOTIFY_CLIENT_SECRET = None
+
+def load_spotify_keys():
+    global SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+    if os.path.exists(app.config['KEY_FILE']):
+        try:
+            with open(app.config['KEY_FILE'], 'r', encoding='utf-8') as f:
+                lines = f.read().splitlines()
+                if len(lines) >= 2:
+                    SPOTIFY_CLIENT_ID = lines[0].strip()
+                    SPOTIFY_CLIENT_SECRET = lines[1].strip()
+                    logging.info("Spotify keys loaded successfully.")
+                else:
+                    logging.warning("spotify_key.txt format invalid (needs 2 lines).")
+        except Exception as e:
+            logging.error(f"Failed to load spotify_key.txt: {e}")
+    else:
+        logging.warning("spotify_key.txt not found.")
+
+# 起動時に読み込み
+load_spotify_keys()
+
+# --- SpotDL Singleton ---
+_spotdl_instance = None
+_spotdl_lock = threading.Lock()
+
+def get_spotdl_instance():
+    global _spotdl_instance
+    with _spotdl_lock:
+        if _spotdl_instance is None:
+            # 再度キーを確認（ファイルが後から置かれた場合のため）
+            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+                load_spotify_keys()
+            
+            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+                raise Exception("spotify_key.txt が見つからないか、内容が正しくありません。")
+            
+            _spotdl_instance = Spotdl(
+                client_id=SPOTIFY_CLIENT_ID, 
+                client_secret=SPOTIFY_CLIENT_SECRET, 
+                user_auth=False, 
+                headless=True
+            )
+        return _spotdl_instance
 
 # --- 認証・ヘルパー関数 ---
 
@@ -198,7 +241,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
         for entry in entries:
             if not entry: continue
             track_id = str(uuid.uuid4())
-            title = entry.get('title', 'Unknown Title')
+            title = entry.get('track') or entry.get('title', 'Unknown Title')
             video_url = entry.get('url') or entry.get('webpage_url')
             
             placeholder = {
@@ -238,7 +281,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
                 with yt_dlp.YoutubeDL(current_opts) as ydl:
                     dl_info = ydl.extract_info(item['original_url'], download=True)
                     if not dl_info: raise Exception("Download failed")
-                    real_title = dl_info.get('title', 'Unknown Title')
+                    real_title = dl_info.get('track') or dl_info.get('title', 'Unknown Title')
 
                 target['title'] = real_title
                 target['filename'] = f"{base_id}.mp3"
@@ -274,10 +317,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
     logging.info(f"Start Spotify DL: {url}")
     try:
-        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-            raise Exception("Spotify Client ID/Secretが設定されていません。")
-
-        spotdl = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, user_auth=False, headless=True)
+        spotdl = get_spotdl_instance()
         
         try:
             songs = spotdl.search([url])
@@ -295,8 +335,10 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
 
         for song in songs:
             track_id = str(uuid.uuid4())
+            song_title = song.name
+            
             placeholder = {
-                "id": track_id, "title": f"【待機中】 {song.display_name}", "track_number": current_num,
+                "id": track_id, "title": f"【待機中】 {song_title}", "track_number": current_num,
                 "filename": None, "processing": True, "status": "pending",
                 "source_type": "spotify", "original_url": song.url
             }
@@ -313,7 +355,7 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
             target = next((t for t in album['tracks'] if t['id'] == item_dict['id']), None)
             if not target: continue
 
-            target['title'] = f"【DL中...】 {song_obj.display_name}"
+            target['title'] = f"【DL中...】 {song_obj.name}"
             target['status'] = "downloading"
             save_album(album)
 
@@ -324,11 +366,9 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 
                 spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
                 
-                # ここを修正: タプル判定を追加
                 result = spotdl.download(song_obj)
                 
                 if result:
-                    # タプル判定 (song, path)
                     if isinstance(result, tuple):
                         _, path_obj = result
                         dl_file = str(path_obj)
@@ -345,18 +385,18 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
 
                     if os.path.exists(temp_dl_dir): shutil.rmtree(temp_dl_dir)
 
-                    target['title'] = song_obj.display_name
+                    target['title'] = song_obj.name
                     target['filename'] = f"{base_id}.mp3"
                     target['status'] = "completed"
                     if 'processing' in target: del target['processing']
                     save_album(album)
-                    logging.info(f"Spotify DL Success: {song_obj.display_name}")
+                    logging.info(f"Spotify DL Success: {song_obj.name}")
                 else:
                     raise Exception("No file returned")
 
             except Exception as e:
-                logging.error(f"Spotify DL Error ({song_obj.display_name}): {e}")
-                target['title'] = f"【エラー】 {song_obj.display_name}"
+                logging.error(f"Spotify DL Error ({song_obj.name}): {e}")
+                target['title'] = f"【エラー】 {song_obj.name}"
                 target['status'] = "error"
                 target['error_msg'] = str(e)
                 if 'processing' in target: del target['processing']
