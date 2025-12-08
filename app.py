@@ -5,6 +5,7 @@ import threading
 import subprocess
 import shutil
 import logging
+import asyncio  # 【追加】
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, send_from_directory, jsonify, Response, session
 from werkzeug.utils import secure_filename
@@ -29,7 +30,7 @@ app.config['INDEX_FILE'] = os.path.join(app.config['DATA_FOLDER'], 'index.json')
 app.config['UPLOAD_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_upload')
 app.config['SPOTDL_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_spotdl')
 app.config['LOG_FILE'] = os.path.join(app.config['BASE_DIR'], 'server.log')
-app.config['KEY_FILE'] = os.path.join(app.config['BASE_DIR'], 'spotify_key.txt') # キーファイル
+app.config['KEY_FILE'] = os.path.join(app.config['BASE_DIR'], 'spotify_key.txt')
 
 app.secret_key = 'super_secret_key_change_me'
 
@@ -85,7 +86,6 @@ def load_spotify_keys():
     else:
         logging.warning("spotify_key.txt not found.")
 
-# 起動時に読み込み
 load_spotify_keys()
 
 # --- SpotDL Singleton ---
@@ -96,7 +96,6 @@ def get_spotdl_instance():
     global _spotdl_instance
     with _spotdl_lock:
         if _spotdl_instance is None:
-            # 再度キーを確認（ファイルが後から置かれた場合のため）
             if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
                 load_spotify_keys()
             
@@ -315,11 +314,16 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 # --- バックグラウンド処理 (Spotify) ---
 
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
+    # 【重要】スレッド内に新しいイベントループを作成
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     logging.info(f"Start Spotify DL: {url}")
     try:
         spotdl = get_spotdl_instance()
         
         try:
+            # プレイリスト検索
             songs = spotdl.search([url])
         except Exception as e:
             raise Exception(f"Search failed: {e}")
@@ -366,6 +370,7 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 
                 spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
                 
+                # ダウンロード実行
                 result = spotdl.download(song_obj)
                 
                 if result:
@@ -403,7 +408,7 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 save_album(album)
                 if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)):
                     shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
-
+    
     except Exception as e:
         logging.critical(f"Spotify Critical Error: {e}")
         try:
@@ -417,6 +422,9 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                     if 'processing' in target: del target['processing']
                     save_album(album)
         except: pass
+    finally:
+        # ループを閉じる
+        loop.close()
 
 # --- API / Routes ---
 
