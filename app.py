@@ -13,7 +13,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_cors import CORS
 import yt_dlp
 from spotdl import Spotdl
-# 【追加】内部シングルトンを操作するためにインポート
 import spotdl.utils.spotify
 
 app = Flask(__name__)
@@ -90,9 +89,27 @@ def load_spotify_keys():
 
 load_spotify_keys()
 
-# --- SpotDL Lock ---
-# Spotifyクライアントの競合を防ぐためのロック
+# --- SpotDL Singleton ---
+_spotdl_instance = None
 _spotdl_lock = threading.Lock()
+
+def get_spotdl_instance():
+    global _spotdl_instance
+    with _spotdl_lock:
+        if _spotdl_instance is None:
+            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+                load_spotify_keys()
+            
+            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+                raise Exception("spotify_key.txt が見つからないか、内容が正しくありません。")
+            
+            _spotdl_instance = Spotdl(
+                client_id=SPOTIFY_CLIENT_ID, 
+                client_secret=SPOTIFY_CLIENT_SECRET, 
+                user_auth=False, 
+                headless=True
+            )
+        return _spotdl_instance
 
 # --- 認証・ヘルパー関数 ---
 
@@ -148,6 +165,10 @@ def load_album(album_id):
     return None
 
 def save_album(data):
+    # 【修正】保存時に必ずトラック番号でソートする
+    if 'tracks' in data:
+        data['tracks'].sort(key=lambda x: x.get('track_number', 0))
+    
     path = os.path.join(app.config['ALBUMS_FOLDER'], f"{data['id']}.json")
     with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
@@ -212,6 +233,10 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
         if 'entries' in info: entries = list(info['entries'])
         else: entries = [info]
 
+        # 【修正】プレイリストの場合、順番を保証するためにプレイリストインデックスでソート
+        if 'entries' in info:
+            entries.sort(key=lambda x: x.get('playlist_index') if x.get('playlist_index') else float('inf'))
+
         album = load_album(album_id)
         if not album: return
 
@@ -236,8 +261,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
             download_queue.append(placeholder)
             current_num += 1
         
-        album['tracks'].sort(key=lambda x: x['track_number'])
-        save_album(album)
+        save_album(album) # ソートはsave_album内で自動で行われる
 
         ydl_opts_dl = {
             'format': 'bestaudio/best',
@@ -298,28 +322,23 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 # --- バックグラウンド処理 (Spotify) ---
 
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
-    # 排他ロックで複数同時実行を防ぐ（グローバル状態の汚染防止）
+    # 排他ロックで複数同時実行を防ぐ
     with _spotdl_lock:
-        # 新しいイベントループを作成してセット
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         logging.info(f"Start Spotify DL: {url}")
         try:
-            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-                raise Exception("Spotify Client ID/Secretが設定されていません。")
-
-            # 【重要】既存のSpotifyクライアントインスタンスを強制リセット
-            # これにより、新しいイベントループでクライアントが再生成される
-            spotdl.utils.spotify.SpotifyClient._instance = None
-
-            # SpotDL初期化
-            client = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, user_auth=False, headless=True)
+            spotdl = get_spotdl_instance()
             
             try:
-                songs = client.search([url])
+                songs = spotdl.search([url])
             except Exception as e:
                 raise Exception(f"Search failed: {e}")
+
+            # 【修正】アルバムURLの場合、正しいトラック順にするためにソート
+            if "album" in url and len(songs) > 1:
+                songs.sort(key=lambda x: (x.disc_number or 0, x.track_number or 0))
 
             album = load_album(album_id)
             if not album: return
@@ -343,8 +362,7 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 download_queue.append((placeholder, song))
                 current_num += 1
             
-            album['tracks'].sort(key=lambda x: x['track_number'])
-            save_album(album)
+            save_album(album) # ソートはsave_album内で
 
             for item_dict, song_obj in download_queue:
                 album = load_album(album_id)
@@ -361,10 +379,9 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                     temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
                     if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
                     
-                    client.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
+                    spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
                     
-                    # ダウンロード実行
-                    result = client.download(song_obj)
+                    result = spotdl.download(song_obj)
                     
                     if result:
                         if isinstance(result, tuple):
@@ -416,7 +433,6 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                         save_album(album)
             except: pass
         finally:
-            # クライアントのリセット（念のため）とループのクローズ
             spotdl.utils.spotify.SpotifyClient._instance = None
             loop.close()
 
@@ -563,7 +579,6 @@ def admin_add_track(artist_id, album_id):
             "id": str(uuid.uuid4()), "title": request.form.get('title') or file.filename,
             "track_number": int(tn), "filename": fname, "status": "completed", "source_type": "upload"
         })
-        alb['tracks'].sort(key=lambda x: x['track_number'])
         save_album(alb)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
@@ -583,7 +598,6 @@ def admin_add_track_url(artist_id, album_id):
         "id": tid, "title": "初期化中...", "track_number": tn, "filename": None,
         "processing": True, "status": "pending", "source_type": source, "original_url": url
     })
-    alb['tracks'].sort(key=lambda x: x['track_number'])
     save_album(alb)
 
     if source == 'spotify':
@@ -655,7 +669,6 @@ def admin_edit_track(artist_id, album_id, track_id):
         t = next((x for x in alb['tracks'] if x['id'] == track_id), None)
         if t:
             t['title'] = request.form['title']; t['track_number'] = int(request.form['track_number'])
-            alb['tracks'].sort(key=lambda x: x['track_number'])
             save_album(alb)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
