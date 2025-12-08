@@ -2,7 +2,7 @@ import os
 import json
 import uuid
 import threading
-import shutil
+import time
 import subprocess
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, send_from_directory, jsonify, Response, session
@@ -30,6 +30,12 @@ app.config['INDEX_FILE'] = os.path.join(app.config['DATA_FOLDER'], 'index.json')
 app.config['UPLOAD_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_upload')
 
 app.secret_key = 'super_secret_key_change_me'
+
+# === 【重要】ここにSpotifyのキーを入力してください ===
+SPOTIFY_CLIENT_ID = 'ここにClient_IDを貼り付け'
+SPOTIFY_CLIENT_SECRET = 'ここにClient_Secretを貼り付け'
+# ==================================================
+
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD = '123456'
 
@@ -223,7 +229,7 @@ def background_download_process(album_id, url, temp_track_id, start_track_num):
                 target_track['title'] = real_title
                 target_track['filename'] = f"{base_id}.mp3"
                 target_track.pop('processing', None)
-                target_track.pop('error', None) # エラーフラグクリア
+                target_track.pop('error', None)
                 save_album(album)
             except Exception:
                 target_track['title'] = f"【エラー】 {item['title'].replace('【DL中...】 ', '').replace('【待機中】 ', '')}"
@@ -235,14 +241,13 @@ def background_download_process(album_id, url, temp_track_id, start_track_num):
 # --- バックグラウンド処理 (Spotify DL) ---
 def background_spotify_process(album_id, url, temp_track_id=None, start_track_num=1):
     try:
-        # spotDL初期化
-        spotdl_client = Spotdl(client_id=None, client_secret=None, user_auth=False)
+        # Spotifyクライアントの初期化（ID/Secretを渡す）
+        spotdl_client = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
         
-        # 曲情報の取得 (Songオブジェクトのリスト)
         try:
             songs = spotdl_client.search([url])
-        except Exception:
-            # 取得失敗
+        except Exception as e:
+            print(f"Spotify Search Error: {e}")
             album = load_album(album_id)
             if album and temp_track_id:
                 album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
@@ -252,14 +257,12 @@ def background_spotify_process(album_id, url, temp_track_id=None, start_track_nu
         album = load_album(album_id)
         if not album: return
         
-        # 仮トラックがある場合は削除
         if temp_track_id:
             album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
 
         download_queue = []
         current_num = start_track_num
 
-        # プレースホルダー作成
         for song in songs:
             track_id = str(uuid.uuid4())
             placeholder = {
@@ -278,7 +281,6 @@ def background_spotify_process(album_id, url, temp_track_id=None, start_track_nu
         album['tracks'].sort(key=lambda x: x['track_number'])
         save_album(album)
 
-        # ダウンロード実行
         for item in download_queue:
             album = load_album(album_id)
             if not album: break
@@ -290,26 +292,18 @@ def background_spotify_process(album_id, url, temp_track_id=None, start_track_nu
 
             try:
                 base_id = uuid.uuid4().hex
-                # SpotDLはファイル名を指定してダウンロードするのが難しい(仕様上)。
-                # 一旦 temp_upload にダウンロードしてから移動・リネームする
-                
-                # 対象のSongオブジェクトを再検索
                 song_obj = next((s for s in songs if s.url == item['original_url']), None)
                 if not song_obj: raise Exception("Song obj missing")
 
-                # ダウンロード (tempへ)
-                os.chdir(app.config['UPLOAD_TEMP']) # CWD変更
-                download_path = spotdl_client.download(song_obj) # ダウンロード実行
-                
-                # 元の場所に戻る
+                os.chdir(app.config['UPLOAD_TEMP'])
+                download_path = spotdl_client.download(song_obj)
                 os.chdir(app.config['BASE_DIR'])
 
                 if download_path:
-                    # ダウンロードされたファイルを music フォルダへ移動 & リネーム
                     src_path = os.path.join(app.config['UPLOAD_TEMP'], download_path)
                     dst_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
                     
-                    # spotDLはmp3以外で落ちてくることもあるのでffmpegで強制変換して移動
+                    # 320k固定で変換
                     subprocess.run(['ffmpeg', '-y', '-i', src_path, '-b:a', '320k', '-map', 'a', dst_path], 
                                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     
@@ -325,7 +319,6 @@ def background_spotify_process(album_id, url, temp_track_id=None, start_track_nu
                 save_album(album)
 
             except Exception as e:
-                # CWD復帰（念のため）
                 os.chdir(app.config['BASE_DIR'])
                 target['title'] = f"【エラー】 {item['title'].replace('【DL中...】 ', '').replace('【待機中】 ', '')}"
                 target['processing'] = False
@@ -434,21 +427,17 @@ def admin_create_album_spotify(artist_id):
     artist = load_artist(artist_id)
     if not artist: return "Artist not found", 404
 
-    # メタデータ取得のために一時的にダウンロードせずにfetch
     try:
-        client = Spotdl(client_id=None, client_secret=None, user_auth=False)
+        # Spotifyクライアント初期化（ここにも必要）
+        client = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
         songs = client.search([url])
         if not songs: return "曲が見つかりませんでした", 400
         
-        # アルバム情報の推測（最初の曲のアルバム名などを使用）
-        # ※ SpotDLのSongオブジェクトは album_name 等を持っている
         first_song = songs[0]
         album_title = first_song.album_name or "Imported Album"
         album_year = first_song.year or ""
         
-        # アルバム作成
         album_id = str(uuid.uuid4())
-        # カバー画像の取得は複雑になるため省略（後で編集してもらう）
         
         album_ref = {
             "id": album_id, "title": album_title, "year": str(album_year),
@@ -464,7 +453,6 @@ def admin_create_album_spotify(artist_id):
         }
         save_album(new_album_detail)
 
-        # 全曲インポート開始
         thread = threading.Thread(
             target=background_spotify_process,
             args=(album_id, url, None, 1)
@@ -574,7 +562,6 @@ def admin_add_track_url(artist_id, album_id):
     album['tracks'].sort(key=lambda x: x['track_number'])
     save_album(album)
 
-    # URL判定 (Spotifyかどうか)
     if "spotify.com" in url:
         thread = threading.Thread(target=background_spotify_process, args=(album_id, url, temp_id, int(num)))
     else:
@@ -610,7 +597,6 @@ def admin_delete_track(artist_id, album_id, track_id):
         save_album(album)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
-# --- リトライ機能 ---
 @app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/retry', methods=['POST'])
 @requires_auth
 def admin_retry_track(artist_id, album_id, track_id):
@@ -619,23 +605,16 @@ def admin_retry_track(artist_id, album_id, track_id):
     t = next((x for x in album['tracks'] if x['id']==track_id), None)
     
     if t and t.get('original_url'):
-        # 状態をリセット
         t['processing'] = True
         t.pop('error', None)
         t['title'] = f"【再試行中】 {t['title'].replace('【エラー】 ', '')}"
         save_album(album)
         
-        # ソースに応じて再実行
         source = t.get('source_type', 'youtube')
-        
-        # ※バックグラウンドプロセスは「リストをDL」する仕様になっているため、単体用にラッパーするか
-        # 既存のプロセスに投げる。ここではURLが単体であれば既存プロセスでOK。
-        # プレイリストの一部だった場合でも original_url がその曲単体を指していればOK。
         if source == 'spotify':
              thread = threading.Thread(target=background_spotify_process, args=(album_id, t['original_url'], None, t['track_number']))
         else:
              thread = threading.Thread(target=background_download_process, args=(album_id, t['original_url'], None, t['track_number']))
-        
         thread.start()
 
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
@@ -646,7 +625,6 @@ def admin_retry_all(artist_id, album_id):
     album = load_album(album_id)
     if not album: return "Not found", 404
     
-    # エラーのトラックを探して順次再試行
     for t in album['tracks']:
         if t.get('error') and t.get('original_url'):
             t['processing'] = True
@@ -659,8 +637,6 @@ def admin_retry_all(artist_id, album_id):
             else:
                  thread = threading.Thread(target=background_download_process, args=(album_id, t['original_url'], None, t['track_number']))
             thread.start()
-            
-            # 少し待機しないとスレッドが一気に立ち上がりすぎる可能性があるため
             time.sleep(0.5)
 
     save_album(album)
