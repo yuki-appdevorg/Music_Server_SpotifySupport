@@ -4,6 +4,7 @@ import uuid
 import threading
 import subprocess
 import shutil
+import logging
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, send_from_directory, jsonify, Response, session
 from werkzeug.utils import secure_filename
@@ -11,13 +12,13 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_cors import CORS
 import yt_dlp
 from spotdl import Spotdl
-from spotdl.types.song import Song
 
 app = Flask(__name__)
 CORS(app)
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+# --- パス設定 ---
 app.config['BASE_DIR'] = os.path.dirname(os.path.abspath(__file__))
 app.config['MUSIC_FOLDER'] = os.path.join(app.config['BASE_DIR'], 'music')
 app.config['IMAGES_FOLDER'] = os.path.join(app.config['BASE_DIR'], 'images')
@@ -26,7 +27,8 @@ app.config['ARTISTS_FOLDER'] = os.path.join(app.config['DATA_FOLDER'], 'artists'
 app.config['ALBUMS_FOLDER'] = os.path.join(app.config['DATA_FOLDER'], 'albums')
 app.config['INDEX_FILE'] = os.path.join(app.config['DATA_FOLDER'], 'index.json')
 app.config['UPLOAD_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_upload')
-app.config['SPOTDL_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_spotdl') # SpotDL一時保存
+app.config['SPOTDL_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_spotdl')
+app.config['LOG_FILE'] = os.path.join(app.config['BASE_DIR'], 'server.log') # ログファイル
 
 app.secret_key = 'super_secret_key_change_me'
 
@@ -36,7 +38,21 @@ ADMIN_PASSWORD = '123456'
 ALLOWED_EXTENSIONS_IMG = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'webm', 'mkv'}
 
-# 初期化
+# --- ログ設定 ---
+logging.basicConfig(
+    filename=app.config['LOG_FILE'],
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+# コンソールにも出す設定
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+console.setFormatter(formatter)
+logging.getLogger('').addHandler(console)
+
+# --- 初期化 ---
 for folder in [app.config['MUSIC_FOLDER'], app.config['IMAGES_FOLDER'], app.config['DATA_FOLDER'], 
                app.config['ARTISTS_FOLDER'], app.config['ALBUMS_FOLDER'], app.config['UPLOAD_TEMP'],
                app.config['SPOTDL_TEMP']]:
@@ -47,7 +63,7 @@ if not os.path.exists(app.config['INDEX_FILE']):
     with open(app.config['INDEX_FILE'], 'w', encoding='utf-8') as f:
         json.dump([], f)
 
-# --- 認証・ヘルパー関数 (前回と同じ) ---
+# --- 認証・ヘルパー関数 ---
 
 def check_auth(username, password):
     return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
@@ -81,7 +97,6 @@ def load_artist(artist_id):
 def save_artist(data):
     path = os.path.join(app.config['ARTISTS_FOLDER'], f"{data['id']}.json")
     with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
-    # Index更新
     idx = load_index()
     summary = {
         "id": data['id'], "name": data['name'], "genre": data.get('genre', ''),
@@ -146,7 +161,8 @@ def process_upload_file(file):
     try:
         subprocess.run(['ffmpeg', '-y', '-i', temp_path, '-b:a', '320k', '-map', 'a', hq_path],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except:
+    except Exception as e:
+        logging.error(f"File convert error: {e}")
         if os.path.exists(temp_path): os.remove(temp_path)
         return None
     if os.path.exists(temp_path): os.remove(temp_path)
@@ -155,18 +171,19 @@ def process_upload_file(file):
 # --- バックグラウンド処理 (YouTube) ---
 
 def background_youtube_process(album_id, url, temp_track_id, start_track_num):
+    logging.info(f"Start YouTube DL: {url}")
     try:
         ydl_opts_info = {'quiet': True, 'extract_flat': 'in_playlist', 'ignoreerrors': True}
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
 
+        if not info: raise Exception("Info fetch failed")
         if 'entries' in info: entries = list(info['entries'])
         else: entries = [info]
 
         album = load_album(album_id)
         if not album: return
 
-        # 仮トラック削除
         if temp_track_id:
             album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
 
@@ -180,14 +197,9 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
             video_url = entry.get('url') or entry.get('webpage_url')
             
             placeholder = {
-                "id": track_id,
-                "title": f"【待機中】 {title}",
-                "track_number": current_num,
-                "filename": None,
-                "processing": True,
-                "status": "pending",
-                "source_type": "youtube",
-                "original_url": video_url
+                "id": track_id, "title": f"【待機中】 {title}", "track_number": current_num,
+                "filename": None, "processing": True, "status": "pending",
+                "source_type": "youtube", "original_url": video_url
             }
             album['tracks'].append(placeholder)
             download_queue.append(placeholder)
@@ -220,6 +232,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 
                 with yt_dlp.YoutubeDL(current_opts) as ydl:
                     dl_info = ydl.extract_info(item['original_url'], download=True)
+                    if not dl_info: raise Exception("Download failed")
                     real_title = dl_info.get('title', 'Unknown Title')
 
                 target['title'] = real_title
@@ -227,8 +240,10 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
                 target['status'] = "completed"
                 if 'processing' in target: del target['processing']
                 save_album(album)
+                logging.info(f"YouTube DL Success: {real_title}")
 
             except Exception as e:
+                logging.error(f"YouTube DL Error ({item['original_url']}): {e}")
                 target['title'] = f"【エラー】 {item['title'].replace('【待機中】 ', '')}"
                 target['status'] = "error"
                 target['error_msg'] = str(e)
@@ -236,25 +251,29 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
                 save_album(album)
 
     except Exception as e:
-        print(f"YouTube process error: {e}")
+        logging.critical(f"YouTube Critical Error: {e}")
+        try:
+            album = load_album(album_id)
+            if album and temp_track_id:
+                target = next((t for t in album['tracks'] if t['id'] == temp_track_id), None)
+                if target:
+                    target['title'] = "【初期化エラー】"
+                    target['status'] = "error"
+                    target['error_msg'] = str(e)
+                    if 'processing' in target: del target['processing']
+                    save_album(album)
+        except: pass
 
 # --- バックグラウンド処理 (Spotify) ---
 
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
+    logging.info(f"Start Spotify DL: {url}")
     try:
-        # SpotDL初期化 (APIキーなしで動作するモードを使用、必要なら引数に追加)
         spotdl = Spotdl(client_id=None, client_secret=None, user_auth=False, headless=True)
-        
-        # 検索 (プレイリスト対応)
         try:
             songs = spotdl.search([url])
         except Exception as e:
-            # 検索失敗
-            album = load_album(album_id)
-            if temp_track_id:
-                album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
-            save_album(album)
-            return
+            raise Exception(f"Search failed: {e}")
 
         album = load_album(album_id)
         if not album: return
@@ -265,18 +284,12 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
         download_queue = []
         current_num = start_track_num
 
-        # プレースホルダー作成
         for song in songs:
             track_id = str(uuid.uuid4())
             placeholder = {
-                "id": track_id,
-                "title": f"【待機中】 {song.display_name}",
-                "track_number": current_num,
-                "filename": None,
-                "processing": True,
-                "status": "pending",
-                "source_type": "spotify",
-                "original_url": song.url
+                "id": track_id, "title": f"【待機中】 {song.display_name}", "track_number": current_num,
+                "filename": None, "processing": True, "status": "pending",
+                "source_type": "spotify", "original_url": song.url
             }
             album['tracks'].append(placeholder)
             download_queue.append((placeholder, song))
@@ -285,7 +298,6 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
         album['tracks'].sort(key=lambda x: x['track_number'])
         save_album(album)
 
-        # ダウンロード実行
         for item_dict, song_obj in download_queue:
             album = load_album(album_id)
             if not album: break
@@ -298,23 +310,14 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
 
             try:
                 base_id = uuid.uuid4().hex
-                # SpotDLは出力パスを指定できるが、一時フォルダに出してから移動が確実
-                # 320k強制のためffmpeg引数などはSpotDLの仕様に委ねる（デフォルトで高音質）
-                
-                # 作業用一時フォルダ
                 temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
                 if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
                 
-                # ダウンロード実行 (SpotDLのダウンローダーを使用)
                 spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
-                # m4aなどが落ちてくる場合があるので後で変換確認
                 downloaded_path = spotdl.download(song_obj)
 
                 if downloaded_path:
-                    # ダウンロードされたファイルを取得
-                    dl_file = str(downloaded_path) # Path object to string
-                    
-                    # FFmpegでmp3(320k)に正規化してmusicフォルダへ
+                    dl_file = str(downloaded_path)
                     final_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
                     
                     subprocess.run([
@@ -323,30 +326,40 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                         final_path
                     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                    # 一時ファイル削除
-                    shutil.rmtree(temp_dl_dir)
+                    if os.path.exists(temp_dl_dir): shutil.rmtree(temp_dl_dir)
 
                     target['title'] = song_obj.display_name
                     target['filename'] = f"{base_id}.mp3"
                     target['status'] = "completed"
                     if 'processing' in target: del target['processing']
                     save_album(album)
+                    logging.info(f"Spotify DL Success: {song_obj.display_name}")
                 else:
-                    raise Exception("Download failed (No file returned)")
+                    raise Exception("No file returned")
 
             except Exception as e:
+                logging.error(f"Spotify DL Error ({song_obj.display_name}): {e}")
                 target['title'] = f"【エラー】 {song_obj.display_name}"
                 target['status'] = "error"
                 target['error_msg'] = str(e)
                 if 'processing' in target: del target['processing']
                 save_album(album)
-                # クリーンアップ
                 if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)):
                     shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
 
     except Exception as e:
-        print(f"Spotify process error: {e}")
-
+        logging.critical(f"Spotify Critical Error: {e}")
+        try:
+            album = load_album(album_id)
+            if album and temp_track_id:
+                target = next((t for t in album['tracks'] if t['id'] == temp_track_id), None)
+                if target:
+                    target['title'] = "【初期化エラー】"
+                    target['status'] = "error"
+                    target['error_msg'] = str(e)
+                    if 'processing' in target: del target['processing']
+                    save_album(album)
+        except: pass
 
 # --- API / Routes ---
 
@@ -386,7 +399,6 @@ def api_get_album_detail(album_id):
     if album.get('cover_image'):
         album['cover_url'] = url_for('serve_image', filename=album['cover_image'], _external=True, _scheme='https')
     for track in album['tracks']:
-        # エラーや処理中のものはストリームURLを出さない
         if track.get('status') == 'completed' and track.get('filename'):
             track['stream_url'] = url_for('stream_music', filename=track['filename'], _external=True, _scheme='https')
         track['cover_url'] = album.get('cover_url')
@@ -500,7 +512,7 @@ def admin_add_track(artist_id, album_id):
 @requires_auth
 def admin_add_track_url(artist_id, album_id):
     url = request.form.get('url')
-    source = request.form.get('source', 'youtube') # youtube or spotify
+    source = request.form.get('source', 'youtube')
     
     alb = load_album(album_id)
     if not alb: return "Error", 404
@@ -508,7 +520,6 @@ def admin_add_track_url(artist_id, album_id):
     tn = int(request.form.get('track_number') or len(alb['tracks']) + 1)
     tid = str(uuid.uuid4())
     
-    # プレースホルダー追加
     alb['tracks'].append({
         "id": tid, "title": "初期化中...", "track_number": tn, "filename": None,
         "processing": True, "status": "pending", "source_type": source, "original_url": url
@@ -534,7 +545,6 @@ def admin_retry_track(artist_id, album_id, track_id):
     if not target: return "Track not found", 404
     
     if target.get('status') == 'error':
-        # ステータスをリセットして再開
         target['status'] = 'pending'
         target['processing'] = True
         target['title'] = f"【再試行中】 {target.get('title', '').replace('【エラー】 ', '')}"
@@ -544,7 +554,6 @@ def admin_retry_track(artist_id, album_id, track_id):
         source = target.get('source_type', 'youtube')
         tn = target.get('track_number')
         
-        # 既存のIDを使って再処理するので temp_track_id は None (削除しないため)
         if source == 'spotify':
             t = threading.Thread(target=background_spotify_process, args=(album_id, url, None, tn))
         else:
@@ -559,9 +568,7 @@ def admin_retry_all(artist_id, album_id):
     alb = load_album(album_id)
     if not alb: return "Error", 404
     
-    # エラーのトラックだけを抽出してループ
     error_tracks = [t for t in alb['tracks'] if t.get('status') == 'error']
-    
     for target in error_tracks:
         target['status'] = 'pending'
         target['processing'] = True
@@ -572,14 +579,11 @@ def admin_retry_all(artist_id, album_id):
         source = target.get('source_type', 'youtube')
         tn = target.get('track_number')
         
-        # ※注意: 一気にスレッドを立ち上げすぎるとサーバー負荷がかかるが、
-        # 今回はシンプル実装のためそのままループで回す
         if source == 'spotify':
             t = threading.Thread(target=background_spotify_process, args=(album_id, url, None, tn))
         else:
             t = threading.Thread(target=background_youtube_process, args=(album_id, url, None, tn))
         t.start()
-        # 少し間隔を空ける
         time.sleep(0.5)
 
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
