@@ -2,8 +2,8 @@ import os
 import json
 import uuid
 import threading
-import time
 import subprocess
+import shutil
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, send_from_directory, jsonify, Response, session
 from werkzeug.utils import secure_filename
@@ -16,10 +16,8 @@ from spotdl.types.song import Song
 app = Flask(__name__)
 CORS(app)
 
-# プロキシ対応
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# --- 設定 ---
 app.config['BASE_DIR'] = os.path.dirname(os.path.abspath(__file__))
 app.config['MUSIC_FOLDER'] = os.path.join(app.config['BASE_DIR'], 'music')
 app.config['IMAGES_FOLDER'] = os.path.join(app.config['BASE_DIR'], 'images')
@@ -28,13 +26,9 @@ app.config['ARTISTS_FOLDER'] = os.path.join(app.config['DATA_FOLDER'], 'artists'
 app.config['ALBUMS_FOLDER'] = os.path.join(app.config['DATA_FOLDER'], 'albums')
 app.config['INDEX_FILE'] = os.path.join(app.config['DATA_FOLDER'], 'index.json')
 app.config['UPLOAD_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_upload')
+app.config['SPOTDL_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_spotdl') # SpotDL一時保存
 
 app.secret_key = 'super_secret_key_change_me'
-
-# === 【重要】ここにSpotifyのキーを入力してください ===
-SPOTIFY_CLIENT_ID = 'ここにClient_IDを貼り付け'
-SPOTIFY_CLIENT_SECRET = 'ここにClient_Secretを貼り付け'
-# ==================================================
 
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD = '123456'
@@ -42,8 +36,10 @@ ADMIN_PASSWORD = '123456'
 ALLOWED_EXTENSIONS_IMG = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'webm', 'mkv'}
 
+# 初期化
 for folder in [app.config['MUSIC_FOLDER'], app.config['IMAGES_FOLDER'], app.config['DATA_FOLDER'], 
-               app.config['ARTISTS_FOLDER'], app.config['ALBUMS_FOLDER'], app.config['UPLOAD_TEMP']]:
+               app.config['ARTISTS_FOLDER'], app.config['ALBUMS_FOLDER'], app.config['UPLOAD_TEMP'],
+               app.config['SPOTDL_TEMP']]:
     if not os.path.exists(folder):
         os.makedirs(folder)
 
@@ -51,14 +47,13 @@ if not os.path.exists(app.config['INDEX_FILE']):
     with open(app.config['INDEX_FILE'], 'w', encoding='utf-8') as f:
         json.dump([], f)
 
-# --- 認証 ---
+# --- 認証・ヘルパー関数 (前回と同じ) ---
+
 def check_auth(username, password):
     return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
 
 def authenticate():
-    return Response(
-        '認証が必要です', 401,
-        {'WWW-Authenticate': 'Basic realm="Login Required"'})
+    return Response('認証が必要です', 401, {'WWW-Authenticate': 'Basic realm="Login Required"'})
 
 def requires_auth(f):
     @wraps(f)
@@ -69,85 +64,69 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-# --- データ操作 ---
 def load_index():
     try:
-        with open(app.config['INDEX_FILE'], 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError: return []
+        with open(app.config['INDEX_FILE'], 'r', encoding='utf-8') as f: return json.load(f)
+    except: return []
 
 def save_index(data):
-    with open(app.config['INDEX_FILE'], 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    with open(app.config['INDEX_FILE'], 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
 def load_artist(artist_id):
-    filepath = os.path.join(app.config['ARTISTS_FOLDER'], f"{artist_id}.json")
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
+    path = os.path.join(app.config['ARTISTS_FOLDER'], f"{artist_id}.json")
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f: return json.load(f)
     return None
 
-def save_artist(artist_data):
-    filepath = os.path.join(app.config['ARTISTS_FOLDER'], f"{artist_data['id']}.json")
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(artist_data, f, indent=4, ensure_ascii=False)
-    
-    index_data = load_index()
+def save_artist(data):
+    path = os.path.join(app.config['ARTISTS_FOLDER'], f"{data['id']}.json")
+    with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
+    # Index更新
+    idx = load_index()
     summary = {
-        "id": artist_data['id'],
-        "name": artist_data['name'],
-        "genre": artist_data.get('genre', ''),
-        "description": artist_data.get('description', ''),
-        "image": artist_data.get('image', ''),
-        "album_count": len(artist_data['albums'])
+        "id": data['id'], "name": data['name'], "genre": data.get('genre', ''),
+        "description": data.get('description', ''), "image": data.get('image', ''),
+        "album_count": len(data['albums'])
     }
     found = False
-    for i, item in enumerate(index_data):
-        if item['id'] == artist_data['id']:
-            index_data[i] = summary
-            found = True
-            break
-    if not found: index_data.append(summary)
-    save_index(index_data)
+    for i, item in enumerate(idx):
+        if item['id'] == data['id']:
+            idx[i] = summary; found = True; break
+    if not found: idx.append(summary)
+    save_index(idx)
 
 def load_album(album_id):
-    filepath = os.path.join(app.config['ALBUMS_FOLDER'], f"{album_id}.json")
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
+    path = os.path.join(app.config['ALBUMS_FOLDER'], f"{album_id}.json")
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f: return json.load(f)
     return None
 
-def save_album(album_data):
-    filepath = os.path.join(app.config['ALBUMS_FOLDER'], f"{album_data['id']}.json")
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(album_data, f, indent=4, ensure_ascii=False)
+def save_album(data):
+    path = os.path.join(app.config['ALBUMS_FOLDER'], f"{data['id']}.json")
+    with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
 def delete_artist_data(artist_id):
     artist = load_artist(artist_id)
     if artist:
-        for alb_ref in artist['albums']:
-            alb_path = os.path.join(app.config['ALBUMS_FOLDER'], f"{alb_ref['id']}.json")
-            if os.path.exists(alb_path): os.remove(alb_path)
-        art_path = os.path.join(app.config['ARTISTS_FOLDER'], f"{artist_id}.json")
-        if os.path.exists(art_path): os.remove(art_path)
-    index_data = load_index()
-    index_data = [a for a in index_data if a['id'] != artist_id]
-    save_index(index_data)
+        for alb in artist['albums']:
+            p = os.path.join(app.config['ALBUMS_FOLDER'], f"{alb['id']}.json")
+            if os.path.exists(p): os.remove(p)
+        p = os.path.join(app.config['ARTISTS_FOLDER'], f"{artist_id}.json")
+        if os.path.exists(p): os.remove(p)
+    idx = load_index()
+    idx = [a for a in idx if a['id'] != artist_id]
+    save_index(idx)
 
 def delete_album_data(artist_id, album_id):
-    alb_path = os.path.join(app.config['ALBUMS_FOLDER'], f"{album_id}.json")
-    if os.path.exists(alb_path): os.remove(alb_path)
+    p = os.path.join(app.config['ALBUMS_FOLDER'], f"{album_id}.json")
+    if os.path.exists(p): os.remove(p)
     artist = load_artist(artist_id)
     if artist:
         artist['albums'] = [a for a in artist['albums'] if a['id'] != album_id]
         save_artist(artist)
 
-# --- ファイル処理 ---
-def allowed_image(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS_IMG
-
-def allowed_audio(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS_AUDIO
+def allowed_image(f): return '.' in f and f.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS_IMG
+def allowed_audio(f): return '.' in f and f.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS_AUDIO
 
 def save_image_file(file):
     if file and allowed_image(file.filename):
@@ -165,42 +144,55 @@ def process_upload_file(file):
     final_filename = f"{base_id}.mp3"
     hq_path = os.path.join(app.config['MUSIC_FOLDER'], final_filename)
     try:
-        subprocess.run(['ffmpeg', '-y', '-i', temp_path, '-b:a', '320k', '-map', 'a', hq_path], 
+        subprocess.run(['ffmpeg', '-y', '-i', temp_path, '-b:a', '320k', '-map', 'a', hq_path],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
+    except:
         if os.path.exists(temp_path): os.remove(temp_path)
         return None
     if os.path.exists(temp_path): os.remove(temp_path)
     return final_filename
 
-# --- バックグラウンド処理 (YouTube DL) ---
-def background_download_process(album_id, url, temp_track_id, start_track_num):
+# --- バックグラウンド処理 (YouTube) ---
+
+def background_youtube_process(album_id, url, temp_track_id, start_track_num):
     try:
         ydl_opts_info = {'quiet': True, 'extract_flat': 'in_playlist', 'ignoreerrors': True}
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
+
         if 'entries' in info: entries = list(info['entries'])
         else: entries = [info]
 
         album = load_album(album_id)
         if not album: return
-        album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
+
+        # 仮トラック削除
+        if temp_track_id:
+            album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
 
         download_queue = []
         current_num = start_track_num
+
         for entry in entries:
             if not entry: continue
             track_id = str(uuid.uuid4())
             title = entry.get('title', 'Unknown Title')
             video_url = entry.get('url') or entry.get('webpage_url')
+            
             placeholder = {
-                "id": track_id, "title": f"【待機中】 {title}",
-                "track_number": current_num, "filename": None,
-                "processing": True, "original_url": video_url, "source_type": "youtube"
+                "id": track_id,
+                "title": f"【待機中】 {title}",
+                "track_number": current_num,
+                "filename": None,
+                "processing": True,
+                "status": "pending",
+                "source_type": "youtube",
+                "original_url": video_url
             }
             album['tracks'].append(placeholder)
             download_queue.append(placeholder)
             current_num += 1
+        
         album['tracks'].sort(key=lambda x: x['track_number'])
         save_album(album)
 
@@ -213,124 +205,151 @@ def background_download_process(album_id, url, temp_track_id, start_track_num):
         for item in download_queue:
             album = load_album(album_id)
             if not album: break
-            target_track = next((t for t in album['tracks'] if t['id'] == item['id']), None)
-            if not target_track: continue
-            
-            target_track['title'] = f"【DL中...】 {item['title'].replace('【待機中】 ', '')}"
+            target = next((t for t in album['tracks'] if t['id'] == item['id']), None)
+            if not target: continue
+
+            target['title'] = f"【DL中...】 {item['title'].replace('【待機中】 ', '')}"
+            target['status'] = "downloading"
             save_album(album)
+
             try:
                 base_id = uuid.uuid4().hex
                 save_path_base = os.path.join(app.config['MUSIC_FOLDER'], base_id)
                 current_opts = ydl_opts_dl.copy()
                 current_opts['outtmpl'] = save_path_base
+
                 with yt_dlp.YoutubeDL(current_opts) as ydl:
                     dl_info = ydl.extract_info(item['original_url'], download=True)
                     real_title = dl_info.get('title', 'Unknown Title')
-                target_track['title'] = real_title
-                target_track['filename'] = f"{base_id}.mp3"
-                target_track.pop('processing', None)
-                target_track.pop('error', None)
-                save_album(album)
-            except Exception:
-                target_track['title'] = f"【エラー】 {item['title'].replace('【DL中...】 ', '').replace('【待機中】 ', '')}"
-                target_track['processing'] = False
-                target_track['error'] = True
-                save_album(album)
-    except Exception as e: print(f"YT BG Error: {e}")
 
-# --- バックグラウンド処理 (Spotify DL) ---
-def background_spotify_process(album_id, url, temp_track_id=None, start_track_num=1):
-    try:
-        # Spotifyクライアントの初期化（ID/Secretを渡す）
-        spotdl_client = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
-        
-        try:
-            songs = spotdl_client.search([url])
-        except Exception as e:
-            print(f"Spotify Search Error: {e}")
-            album = load_album(album_id)
-            if album and temp_track_id:
-                album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
+                target['title'] = real_title
+                target['filename'] = f"{base_id}.mp3"
+                target['status'] = "completed"
+                if 'processing' in target: del target['processing']
                 save_album(album)
+
+            except Exception as e:
+                target['title'] = f"【エラー】 {item['title'].replace('【待機中】 ', '')}"
+                target['status'] = "error"
+                target['error_msg'] = str(e)
+                if 'processing' in target: del target['processing']
+                save_album(album)
+
+    except Exception as e:
+        print(f"YouTube process error: {e}")
+
+# --- バックグラウンド処理 (Spotify) ---
+
+def background_spotify_process(album_id, url, temp_track_id, start_track_num):
+    try:
+        # SpotDL初期化 (APIキーなしで動作するモードを使用、必要なら引数に追加)
+        spotdl = Spotdl(client_id=None, client_secret=None, user_auth=False, headless=True)
+        
+        # 検索 (プレイリスト対応)
+        try:
+            songs = spotdl.search([url])
+        except Exception as e:
+            # 検索失敗
+            album = load_album(album_id)
+            if temp_track_id:
+                album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
+            save_album(album)
             return
 
         album = load_album(album_id)
         if not album: return
-        
+
         if temp_track_id:
             album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
 
         download_queue = []
         current_num = start_track_num
 
+        # プレースホルダー作成
         for song in songs:
             track_id = str(uuid.uuid4())
             placeholder = {
                 "id": track_id,
-                "title": f"【待機中】 {song.name}",
+                "title": f"【待機中】 {song.display_name}",
                 "track_number": current_num,
                 "filename": None,
                 "processing": True,
-                "original_url": song.url,
-                "source_type": "spotify"
+                "status": "pending",
+                "source_type": "spotify",
+                "original_url": song.url
             }
             album['tracks'].append(placeholder)
-            download_queue.append(placeholder)
+            download_queue.append((placeholder, song))
             current_num += 1
         
         album['tracks'].sort(key=lambda x: x['track_number'])
         save_album(album)
 
-        for item in download_queue:
+        # ダウンロード実行
+        for item_dict, song_obj in download_queue:
             album = load_album(album_id)
             if not album: break
-            target = next((t for t in album['tracks'] if t['id'] == item['id']), None)
+            target = next((t for t in album['tracks'] if t['id'] == item_dict['id']), None)
             if not target: continue
 
-            target['title'] = f"【DL中...】 {item['title'].replace('【待機中】 ', '')}"
+            target['title'] = f"【DL中...】 {song_obj.display_name}"
+            target['status'] = "downloading"
             save_album(album)
 
             try:
                 base_id = uuid.uuid4().hex
-                song_obj = next((s for s in songs if s.url == item['original_url']), None)
-                if not song_obj: raise Exception("Song obj missing")
-
-                os.chdir(app.config['UPLOAD_TEMP'])
-                download_path = spotdl_client.download(song_obj)
-                os.chdir(app.config['BASE_DIR'])
-
-                if download_path:
-                    src_path = os.path.join(app.config['UPLOAD_TEMP'], download_path)
-                    dst_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
-                    
-                    # 320k固定で変換
-                    subprocess.run(['ffmpeg', '-y', '-i', src_path, '-b:a', '320k', '-map', 'a', dst_path], 
-                                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    if os.path.exists(src_path): os.remove(src_path)
-
-                    target['title'] = song_obj.name
-                    target['filename'] = f"{base_id}.mp3"
-                    target.pop('processing', None)
-                    target.pop('error', None)
-                else:
-                    raise Exception("Download returned None")
+                # SpotDLは出力パスを指定できるが、一時フォルダに出してから移動が確実
+                # 320k強制のためffmpeg引数などはSpotDLの仕様に委ねる（デフォルトで高音質）
                 
-                save_album(album)
+                # 作業用一時フォルダ
+                temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
+                if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
+                
+                # ダウンロード実行 (SpotDLのダウンローダーを使用)
+                spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
+                # m4aなどが落ちてくる場合があるので後で変換確認
+                downloaded_path = spotdl.download(song_obj)
+
+                if downloaded_path:
+                    # ダウンロードされたファイルを取得
+                    dl_file = str(downloaded_path) # Path object to string
+                    
+                    # FFmpegでmp3(320k)に正規化してmusicフォルダへ
+                    final_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
+                    
+                    subprocess.run([
+                        'ffmpeg', '-y', '-i', dl_file,
+                        '-b:a', '320k', '-map', 'a',
+                        final_path
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    # 一時ファイル削除
+                    shutil.rmtree(temp_dl_dir)
+
+                    target['title'] = song_obj.display_name
+                    target['filename'] = f"{base_id}.mp3"
+                    target['status'] = "completed"
+                    if 'processing' in target: del target['processing']
+                    save_album(album)
+                else:
+                    raise Exception("Download failed (No file returned)")
 
             except Exception as e:
-                os.chdir(app.config['BASE_DIR'])
-                target['title'] = f"【エラー】 {item['title'].replace('【DL中...】 ', '').replace('【待機中】 ', '')}"
-                target['processing'] = False
-                target['error'] = True
+                target['title'] = f"【エラー】 {song_obj.display_name}"
+                target['status'] = "error"
+                target['error_msg'] = str(e)
+                if 'processing' in target: del target['processing']
                 save_album(album)
-                print(f"SpotDL Error: {e}")
+                # クリーンアップ
+                if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)):
+                    shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
 
     except Exception as e:
-        print(f"Spotify BG Error: {e}")
-        os.chdir(app.config['BASE_DIR'])
+        print(f"Spotify process error: {e}")
 
-# --- API ---
+
+# --- API / Routes ---
+
 @app.route('/stream/<path:filename>')
 def stream_music(filename):
     return send_from_directory(app.config['MUSIC_FOLDER'], filename)
@@ -367,12 +386,14 @@ def api_get_album_detail(album_id):
     if album.get('cover_image'):
         album['cover_url'] = url_for('serve_image', filename=album['cover_image'], _external=True, _scheme='https')
     for track in album['tracks']:
-        if not track.get('processing') and not track.get('error') and track.get('filename'):
+        # エラーや処理中のものはストリームURLを出さない
+        if track.get('status') == 'completed' and track.get('filename'):
             track['stream_url'] = url_for('stream_music', filename=track['filename'], _external=True, _scheme='https')
         track['cover_url'] = album.get('cover_url')
     return jsonify(album)
 
 # --- Admin Routes ---
+
 @app.route('/')
 def root_redirect(): return redirect('/admin/')
 
@@ -384,25 +405,19 @@ def admin_index(): return render_template('index.html', artists=load_index())
 @requires_auth
 def admin_add_artist():
     img = save_image_file(request.files.get('image'))
-    new_artist = {
-        "id": str(uuid.uuid4()), "name": request.form['name'],
-        "genre": request.form.get('genre',''), "description": request.form.get('description',''),
-        "image": img, "albums": []
-    }
+    new_artist = {"id": str(uuid.uuid4()), "name": request.form['name'], "genre": request.form.get('genre',''), "description": request.form.get('description',''), "image": img, "albums": []}
     save_artist(new_artist)
     return redirect(url_for('admin_index'))
 
 @app.route('/admin/artist/<artist_id>/edit', methods=['POST'])
 @requires_auth
 def admin_edit_artist(artist_id):
-    artist = load_artist(artist_id)
-    if artist:
-        artist['name'] = request.form['name']
-        artist['genre'] = request.form['genre']
-        artist['description'] = request.form['description']
+    a = load_artist(artist_id)
+    if a:
+        a['name'] = request.form['name']; a['genre'] = request.form['genre']; a['description'] = request.form['description']
         img = save_image_file(request.files.get('image'))
-        if img: artist['image'] = img
-        save_artist(artist)
+        if img: a['image'] = img
+        save_artist(a)
     return redirect(url_for('admin_index'))
 
 @app.route('/admin/artist/<artist_id>/delete', methods=['POST'])
@@ -414,101 +429,37 @@ def admin_delete_artist(artist_id):
 @app.route('/admin/artist/<artist_id>')
 @requires_auth
 def admin_view_artist(artist_id):
-    artist = load_artist(artist_id)
-    if not artist: return "Not found", 404
-    return render_template('artist.html', artist=artist)
-
-# --- アルバム自動作成機能 (Spotifyから) ---
-@app.route('/admin/artist/<artist_id>/album/create_spotify', methods=['POST'])
-@requires_auth
-def admin_create_album_spotify(artist_id):
-    url = request.form.get('url')
-    if not url: return "URLが必要です", 400
-    artist = load_artist(artist_id)
-    if not artist: return "Artist not found", 404
-
-    try:
-        # Spotifyクライアント初期化（ここにも必要）
-        client = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
-        songs = client.search([url])
-        if not songs: return "曲が見つかりませんでした", 400
-        
-        first_song = songs[0]
-        album_title = first_song.album_name or "Imported Album"
-        album_year = first_song.year or ""
-        
-        album_id = str(uuid.uuid4())
-        
-        album_ref = {
-            "id": album_id, "title": album_title, "year": str(album_year),
-            "type": "Album", "cover_image": None
-        }
-        artist['albums'].append(album_ref)
-        save_artist(artist)
-
-        new_album_detail = {
-            "id": album_id, "artist_id": artist_id, "artist_name": artist['name'],
-            "title": album_title, "year": str(album_year),
-            "type": "Album", "cover_image": None, "tracks": []
-        }
-        save_album(new_album_detail)
-
-        thread = threading.Thread(
-            target=background_spotify_process,
-            args=(album_id, url, None, 1)
-        )
-        thread.start()
-
-    except Exception as e:
-        return f"Error: {e}", 500
-
-    return redirect(url_for('admin_view_artist', artist_id=artist_id))
+    a = load_artist(artist_id)
+    if not a: return "Not found", 404
+    return render_template('artist.html', artist=a)
 
 @app.route('/admin/artist/<artist_id>/album/add', methods=['POST'])
 @requires_auth
 def admin_add_album(artist_id):
-    artist = load_artist(artist_id)
-    if artist:
-        album_id = str(uuid.uuid4())
+    a = load_artist(artist_id)
+    if a:
+        aid = str(uuid.uuid4())
         img = save_image_file(request.files.get('image'))
-        album_ref = {
-            "id": album_id, "title": request.form['title'],
-            "year": request.form.get('year',''), "type": request.form.get('type','Album'),
-            "cover_image": img
-        }
-        artist['albums'].append(album_ref)
-        save_artist(artist)
-        new_album = {
-            "id": album_id, "artist_id": artist_id, "artist_name": artist['name'],
-            "title": request.form['title'], "year": request.form.get('year',''),
-            "type": request.form.get('type','Album'), "cover_image": img, "tracks": []
-        }
-        save_album(new_album)
+        a['albums'].append({"id": aid, "title": request.form['title'], "year": request.form.get('year',''), "type": request.form.get('type','Album'), "cover_image": img})
+        save_artist(a)
+        save_album({"id": aid, "artist_id": artist_id, "artist_name": a['name'], "title": request.form['title'], "year": request.form.get('year',''), "type": request.form.get('type','Album'), "cover_image": img, "tracks": []})
     return redirect(url_for('admin_view_artist', artist_id=artist_id))
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/edit', methods=['POST'])
 @requires_auth
 def admin_edit_album(artist_id, album_id):
-    artist = load_artist(artist_id)
-    album = load_album(album_id)
-    if artist and album:
-        title = request.form['title']
-        year = request.form['year']
-        atype = request.form['type']
+    a = load_artist(artist_id); alb = load_album(album_id)
+    if a and alb:
+        t, y, tp = request.form['title'], request.form['year'], request.form['type']
         img = save_image_file(request.files.get('image'))
-        for ref in artist['albums']:
-            if ref['id'] == album_id:
-                ref['title'] = title
-                ref['year'] = year
-                ref['type'] = atype
-                if img: ref['cover_image'] = img
-                break
-        save_artist(artist)
-        album['title'] = title
-        album['year'] = year
-        album['type'] = atype
-        if img: album['cover_image'] = img
-        save_album(album)
+        for r in a['albums']:
+            if r['id'] == album_id:
+                r['title'] = t; r['year'] = y; r['type'] = tp
+                if img: r['cover_image'] = img
+        save_artist(a)
+        alb['title'] = t; alb['year'] = y; alb['type'] = tp
+        if img: alb['cover_image'] = img
+        save_album(alb)
     return redirect(url_for('admin_view_artist', artist_id=artist_id))
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/delete', methods=['POST'])
@@ -520,126 +471,142 @@ def admin_delete_album(artist_id, album_id):
 @app.route('/admin/artist/<artist_id>/album/<album_id>')
 @requires_auth
 def admin_view_album(artist_id, album_id):
-    artist = load_artist(artist_id)
-    album = load_album(album_id)
-    if not artist or not album: return "Not found", 404
-    return render_template('album.html', artist=artist, album=album)
+    a = load_artist(artist_id); alb = load_album(album_id)
+    if not a or not alb: return "Not found", 404
+    return render_template('album.html', artist=a, album=alb)
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/track/add', methods=['POST'])
 @requires_auth
 def admin_add_track(artist_id, album_id):
-    file = request.files.get('file')
-    if not file or not file.filename: return "ファイルなし", 400
+    if 'file' not in request.files: return "No file", 400
+    file = request.files['file']
+    if not file.filename: return "No filename", 400
+    
     fname = process_upload_file(file)
-    if not fname: return "変換失敗", 500
-    album = load_album(album_id)
-    if album:
-        num = request.form.get('track_number') or len(album['tracks'])+1
-        new_track = {
+    if not fname: return "Error", 500
+    
+    alb = load_album(album_id)
+    if alb:
+        tn = request.form.get('track_number') or len(alb['tracks']) + 1
+        alb['tracks'].append({
             "id": str(uuid.uuid4()), "title": request.form.get('title') or file.filename,
-            "track_number": int(num), "filename": fname
-        }
-        album['tracks'].append(new_track)
-        album['tracks'].sort(key=lambda x: x['track_number'])
-        save_album(album)
+            "track_number": int(tn), "filename": fname, "status": "completed", "source_type": "upload"
+        })
+        alb['tracks'].sort(key=lambda x: x['track_number'])
+        save_album(alb)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/track/add_url', methods=['POST'])
 @requires_auth
 def admin_add_track_url(artist_id, album_id):
     url = request.form.get('url')
-    if not url: return "URLなし", 400
-    album = load_album(album_id)
-    if not album: return "Not found", 404
+    source = request.form.get('source', 'youtube') # youtube or spotify
     
-    num = request.form.get('track_number') or len(album['tracks'])+1
-    temp_id = str(uuid.uuid4())
-    temp_track = {
-        "id": temp_id, "title": "インポート準備中...",
-        "track_number": int(num), "filename": None, "processing": True
-    }
-    album['tracks'].append(temp_track)
-    album['tracks'].sort(key=lambda x: x['track_number'])
-    save_album(album)
+    alb = load_album(album_id)
+    if not alb: return "Error", 404
 
-    if "spotify.com" in url:
-        thread = threading.Thread(target=background_spotify_process, args=(album_id, url, temp_id, int(num)))
+    tn = int(request.form.get('track_number') or len(alb['tracks']) + 1)
+    tid = str(uuid.uuid4())
+    
+    # プレースホルダー追加
+    alb['tracks'].append({
+        "id": tid, "title": "初期化中...", "track_number": tn, "filename": None,
+        "processing": True, "status": "pending", "source_type": source, "original_url": url
+    })
+    alb['tracks'].sort(key=lambda x: x['track_number'])
+    save_album(alb)
+
+    if source == 'spotify':
+        t = threading.Thread(target=background_spotify_process, args=(album_id, url, tid, tn))
     else:
-        thread = threading.Thread(target=background_download_process, args=(album_id, url, temp_id, int(num)))
-    thread.start()
+        t = threading.Thread(target=background_youtube_process, args=(album_id, url, tid, tn))
+    t.start()
     
-    return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
-
-@app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/edit', methods=['POST'])
-@requires_auth
-def admin_edit_track(artist_id, album_id, track_id):
-    album = load_album(album_id)
-    if album:
-        t = next((x for x in album['tracks'] if x['id']==track_id), None)
-        if t:
-            t['title'] = request.form['title']
-            try: t['track_number'] = int(request.form['track_number'])
-            except: pass
-            album['tracks'].sort(key=lambda x: x['track_number'])
-            save_album(album)
-    return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
-
-@app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/delete', methods=['POST'])
-@requires_auth
-def admin_delete_track(artist_id, album_id, track_id):
-    album = load_album(album_id)
-    if album:
-        t = next((x for x in album['tracks'] if x['id']==track_id), None)
-        if t and t.get('filename'):
-            try: os.remove(os.path.join(app.config['MUSIC_FOLDER'], t['filename']))
-            except: pass
-        album['tracks'] = [x for x in album['tracks'] if x['id']!=track_id]
-        save_album(album)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/retry', methods=['POST'])
 @requires_auth
 def admin_retry_track(artist_id, album_id, track_id):
-    album = load_album(album_id)
-    if not album: return "Not found", 404
-    t = next((x for x in album['tracks'] if x['id']==track_id), None)
+    alb = load_album(album_id)
+    if not alb: return "Error", 404
     
-    if t and t.get('original_url'):
-        t['processing'] = True
-        t.pop('error', None)
-        t['title'] = f"【再試行中】 {t['title'].replace('【エラー】 ', '')}"
-        save_album(album)
+    target = next((t for t in alb['tracks'] if t['id'] == track_id), None)
+    if not target: return "Track not found", 404
+    
+    if target.get('status') == 'error':
+        # ステータスをリセットして再開
+        target['status'] = 'pending'
+        target['processing'] = True
+        target['title'] = f"【再試行中】 {target.get('title', '').replace('【エラー】 ', '')}"
+        save_album(alb)
         
-        source = t.get('source_type', 'youtube')
+        url = target.get('original_url')
+        source = target.get('source_type', 'youtube')
+        tn = target.get('track_number')
+        
+        # 既存のIDを使って再処理するので temp_track_id は None (削除しないため)
         if source == 'spotify':
-             thread = threading.Thread(target=background_spotify_process, args=(album_id, t['original_url'], None, t['track_number']))
+            t = threading.Thread(target=background_spotify_process, args=(album_id, url, None, tn))
         else:
-             thread = threading.Thread(target=background_download_process, args=(album_id, t['original_url'], None, t['track_number']))
-        thread.start()
-
+            t = threading.Thread(target=background_youtube_process, args=(album_id, url, None, tn))
+        t.start()
+        
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/retry_all', methods=['POST'])
 @requires_auth
 def admin_retry_all(artist_id, album_id):
-    album = load_album(album_id)
-    if not album: return "Not found", 404
+    alb = load_album(album_id)
+    if not alb: return "Error", 404
     
-    for t in album['tracks']:
-        if t.get('error') and t.get('original_url'):
-            t['processing'] = True
-            t.pop('error', None)
-            t['title'] = f"【再試行中】 {t['title'].replace('【エラー】 ', '')}"
-            
-            source = t.get('source_type', 'youtube')
-            if source == 'spotify':
-                 thread = threading.Thread(target=background_spotify_process, args=(album_id, t['original_url'], None, t['track_number']))
-            else:
-                 thread = threading.Thread(target=background_download_process, args=(album_id, t['original_url'], None, t['track_number']))
-            thread.start()
-            time.sleep(0.5)
+    # エラーのトラックだけを抽出してループ
+    error_tracks = [t for t in alb['tracks'] if t.get('status') == 'error']
+    
+    for target in error_tracks:
+        target['status'] = 'pending'
+        target['processing'] = True
+        target['title'] = f"【一括再試行】 {target.get('title', '').replace('【エラー】 ', '')}"
+        save_album(alb)
+        
+        url = target.get('original_url')
+        source = target.get('source_type', 'youtube')
+        tn = target.get('track_number')
+        
+        # ※注意: 一気にスレッドを立ち上げすぎるとサーバー負荷がかかるが、
+        # 今回はシンプル実装のためそのままループで回す
+        if source == 'spotify':
+            t = threading.Thread(target=background_spotify_process, args=(album_id, url, None, tn))
+        else:
+            t = threading.Thread(target=background_youtube_process, args=(album_id, url, None, tn))
+        t.start()
+        # 少し間隔を空ける
+        time.sleep(0.5)
 
-    save_album(album)
+    return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
+
+@app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/edit', methods=['POST'])
+@requires_auth
+def admin_edit_track(artist_id, album_id, track_id):
+    alb = load_album(album_id)
+    if alb:
+        t = next((x for x in alb['tracks'] if x['id'] == track_id), None)
+        if t:
+            t['title'] = request.form['title']; t['track_number'] = int(request.form['track_number'])
+            alb['tracks'].sort(key=lambda x: x['track_number'])
+            save_album(alb)
+    return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
+
+@app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/delete', methods=['POST'])
+@requires_auth
+def admin_delete_track(artist_id, album_id, track_id):
+    alb = load_album(album_id)
+    if alb:
+        t = next((x for x in alb['tracks'] if x['id'] == track_id), None)
+        if t and t.get('filename'):
+            p = os.path.join(app.config['MUSIC_FOLDER'], t['filename'])
+            if os.path.exists(p): os.remove(p)
+        alb['tracks'] = [x for x in alb['tracks'] if x['id'] != track_id]
+        save_album(alb)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
 if __name__ == '__main__':
