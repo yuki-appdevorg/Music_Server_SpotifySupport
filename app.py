@@ -1,3 +1,4 @@
+
 import os
 import json
 import uuid
@@ -18,7 +19,7 @@ CORS(app)
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# --- パス設定 ---
+# --- 設定 ---
 app.config['BASE_DIR'] = os.path.dirname(os.path.abspath(__file__))
 app.config['MUSIC_FOLDER'] = os.path.join(app.config['BASE_DIR'], 'music')
 app.config['IMAGES_FOLDER'] = os.path.join(app.config['BASE_DIR'], 'images')
@@ -28,12 +29,19 @@ app.config['ALBUMS_FOLDER'] = os.path.join(app.config['DATA_FOLDER'], 'albums')
 app.config['INDEX_FILE'] = os.path.join(app.config['DATA_FOLDER'], 'index.json')
 app.config['UPLOAD_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_upload')
 app.config['SPOTDL_TEMP'] = os.path.join(app.config['BASE_DIR'], 'temp_spotdl')
-app.config['LOG_FILE'] = os.path.join(app.config['BASE_DIR'], 'server.log') # ログファイル
+app.config['LOG_FILE'] = os.path.join(app.config['BASE_DIR'], 'server.log')
 
 app.secret_key = 'super_secret_key_change_me'
 
+# --- 認証情報 (変更してください) ---
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD = '123456'
+
+# --- 【重要】Spotify API設定 ---
+# 取得したIDとSecretをここに貼り付けてください
+# 引用符 ' ' の中に入れてください
+SPOTIFY_CLIENT_ID = ''      # 例: 'ab12345...'
+SPOTIFY_CLIENT_SECRET = ''  # 例: 'cd67890...'
 
 ALLOWED_EXTENSIONS_IMG = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 ALLOWED_EXTENSIONS_AUDIO = {'mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'webm', 'mkv'}
@@ -45,7 +53,6 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-# コンソールにも出す設定
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
@@ -269,7 +276,13 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
     logging.info(f"Start Spotify DL: {url}")
     try:
-        spotdl = Spotdl(client_id=None, client_secret=None, user_auth=False, headless=True)
+        # Client ID/Secretのチェック
+        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+            raise Exception("Spotify Client ID/Secretが設定されていません。app.pyを確認してください。")
+
+        # SpotDL初期化 (認証情報を使用)
+        spotdl = Spotdl(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET, user_auth=False, headless=True)
+        
         try:
             songs = spotdl.search([url])
         except Exception as e:
