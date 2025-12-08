@@ -13,7 +13,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_cors import CORS
 import yt_dlp
 from spotdl import Spotdl
-import spotdl.utils.spotify
+# 【追加】ダウンローダークラスを直接使う
+from spotdl.download.downloader import Downloader
 
 app = Flask(__name__)
 CORS(app)
@@ -89,11 +90,15 @@ def load_spotify_keys():
 
 load_spotify_keys()
 
-# --- SpotDL Singleton ---
+# --- SpotDL Client Singleton (検索用) ---
 _spotdl_instance = None
 _spotdl_lock = threading.Lock()
 
-def get_spotdl_instance():
+def get_spotdl_client():
+    """
+    検索用のSpotDLクライアントを取得（シングルトン）
+    これにより 'A spotify client has already been initialized' を防ぐ
+    """
     global _spotdl_instance
     with _spotdl_lock:
         if _spotdl_instance is None:
@@ -103,6 +108,7 @@ def get_spotdl_instance():
             if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
                 raise Exception("spotify_key.txt が見つからないか、内容が正しくありません。")
             
+            # 初期化 (検索とメタデータ取得に使用)
             _spotdl_instance = Spotdl(
                 client_id=SPOTIFY_CLIENT_ID, 
                 client_secret=SPOTIFY_CLIENT_SECRET, 
@@ -165,10 +171,6 @@ def load_album(album_id):
     return None
 
 def save_album(data):
-    # 【修正】保存時に必ずトラック番号でソートする
-    if 'tracks' in data:
-        data['tracks'].sort(key=lambda x: x.get('track_number', 0))
-    
     path = os.path.join(app.config['ALBUMS_FOLDER'], f"{data['id']}.json")
     with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
@@ -233,10 +235,6 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
         if 'entries' in info: entries = list(info['entries'])
         else: entries = [info]
 
-        # 【修正】プレイリストの場合、順番を保証するためにプレイリストインデックスでソート
-        if 'entries' in info:
-            entries.sort(key=lambda x: x.get('playlist_index') if x.get('playlist_index') else float('inf'))
-
         album = load_album(album_id)
         if not album: return
 
@@ -249,6 +247,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
         for entry in entries:
             if not entry: continue
             track_id = str(uuid.uuid4())
+            # メタデータ優先、なければタイトル
             title = entry.get('track') or entry.get('title', 'Unknown Title')
             video_url = entry.get('url') or entry.get('webpage_url')
             
@@ -261,7 +260,8 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
             download_queue.append(placeholder)
             current_num += 1
         
-        save_album(album) # ソートはsave_album内で自動で行われる
+        album['tracks'].sort(key=lambda x: x['track_number'])
+        save_album(album)
 
         ydl_opts_dl = {
             'format': 'bestaudio/best',
@@ -322,119 +322,130 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 # --- バックグラウンド処理 (Spotify) ---
 
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
-    # 排他ロックで複数同時実行を防ぐ
-    with _spotdl_lock:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    # スレッド内で新しいイベントループを作成・設定
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    logging.info(f"Start Spotify DL: {url}")
+    try:
+        # 検索にはシングルトンクライアントを使用（認証済み）
+        spotdl_client = get_spotdl_client()
         
-        logging.info(f"Start Spotify DL: {url}")
         try:
-            spotdl = get_spotdl_instance()
+            songs = spotdl_client.search([url])
+        except Exception as e:
+            raise Exception(f"Search failed: {e}")
+
+        album = load_album(album_id)
+        if not album: return
+
+        if temp_track_id:
+            album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
+
+        download_queue = []
+        current_num = start_track_num
+
+        for song in songs:
+            track_id = str(uuid.uuid4())
+            # 曲名のみ使用 (name)
+            song_title = song.name
             
-            try:
-                songs = spotdl.search([url])
-            except Exception as e:
-                raise Exception(f"Search failed: {e}")
+            placeholder = {
+                "id": track_id, "title": f"【待機中】 {song_title}", "track_number": current_num,
+                "filename": None, "processing": True, "status": "pending",
+                "source_type": "spotify", "original_url": song.url
+            }
+            album['tracks'].append(placeholder)
+            download_queue.append((placeholder, song))
+            current_num += 1
+        
+        album['tracks'].sort(key=lambda x: x['track_number'])
+        save_album(album)
 
-            # 【修正】アルバムURLの場合、正しいトラック順にするためにソート
-            if "album" in url and len(songs) > 1:
-                songs.sort(key=lambda x: (x.disc_number or 0, x.track_number or 0))
+        # ダウンロード用の設定
+        dl_settings = {
+            "headless": True,
+            "simple_tui": True,
+            # その他の設定はデフォルトを使用
+        }
 
+        # ダウンロードループ
+        for item_dict, song_obj in download_queue:
             album = load_album(album_id)
-            if not album: return
+            if not album: break
+            target = next((t for t in album['tracks'] if t['id'] == item_dict['id']), None)
+            if not target: continue
 
-            if temp_track_id:
-                album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
+            target['title'] = f"【DL中...】 {song_obj.name}"
+            target['status'] = "downloading"
+            save_album(album)
 
-            download_queue = []
-            current_num = start_track_num
-
-            for song in songs:
-                track_id = str(uuid.uuid4())
-                song_title = song.name
+            try:
+                base_id = uuid.uuid4().hex
+                temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
+                if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
                 
-                placeholder = {
-                    "id": track_id, "title": f"【待機中】 {song_title}", "track_number": current_num,
-                    "filename": None, "processing": True, "status": "pending",
-                    "source_type": "spotify", "original_url": song.url
-                }
-                album['tracks'].append(placeholder)
-                download_queue.append((placeholder, song))
-                current_num += 1
-            
-            save_album(album) # ソートはsave_album内で
+                # 【重要】ダウンロード処理には、このスレッド専用のDownloaderインスタンスを作成して使用
+                # これにより「Different loop」エラーを回避
+                downloader = Downloader(settings=dl_settings, loop=loop)
+                
+                # 出力パス設定
+                downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
+                
+                # ダウンロード実行
+                result = downloader.download_song(song_obj)
+                
+                if result:
+                    # 結果は (song, path) のタプルで返る
+                    _, path_obj = result
+                    dl_file = str(path_obj)
 
-            for item_dict, song_obj in download_queue:
-                album = load_album(album_id)
-                if not album: break
-                target = next((t for t in album['tracks'] if t['id'] == item_dict['id']), None)
-                if not target: continue
+                    final_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
+                    
+                    subprocess.run([
+                        'ffmpeg', '-y', '-i', dl_file,
+                        '-b:a', '320k', '-map', 'a',
+                        final_path
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                target['title'] = f"【DL中...】 {song_obj.name}"
-                target['status'] = "downloading"
+                    if os.path.exists(temp_dl_dir): shutil.rmtree(temp_dl_dir)
+
+                    target['title'] = song_obj.name
+                    target['filename'] = f"{base_id}.mp3"
+                    target['status'] = "completed"
+                    if 'processing' in target: del target['processing']
+                    save_album(album)
+                    logging.info(f"Spotify DL Success: {song_obj.name}")
+                else:
+                    raise Exception("No file returned from downloader")
+
+            except Exception as e:
+                logging.error(f"Spotify DL Error ({song_obj.name}): {e}")
+                target['title'] = f"【エラー】 {song_obj.name}"
+                target['status'] = "error"
+                target['error_msg'] = str(e)
+                if 'processing' in target: del target['processing']
                 save_album(album)
-
-                try:
-                    base_id = uuid.uuid4().hex
-                    temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
-                    if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
-                    
-                    spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
-                    
-                    result = spotdl.download(song_obj)
-                    
-                    if result:
-                        if isinstance(result, tuple):
-                            _, path_obj = result
-                            dl_file = str(path_obj)
-                        else:
-                            dl_file = str(result)
-
-                        final_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
-                        
-                        subprocess.run([
-                            'ffmpeg', '-y', '-i', dl_file,
-                            '-b:a', '320k', '-map', 'a',
-                            final_path
-                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                        if os.path.exists(temp_dl_dir): shutil.rmtree(temp_dl_dir)
-
-                        target['title'] = song_obj.name
-                        target['filename'] = f"{base_id}.mp3"
-                        target['status'] = "completed"
-                        if 'processing' in target: del target['processing']
-                        save_album(album)
-                        logging.info(f"Spotify DL Success: {song_obj.name}")
-                    else:
-                        raise Exception("No file returned")
-
-                except Exception as e:
-                    logging.error(f"Spotify DL Error ({song_obj.name}): {e}")
-                    target['title'] = f"【エラー】 {song_obj.name}"
+                if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)):
+                    shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
+    
+    except Exception as e:
+        logging.critical(f"Spotify Critical Error: {e}")
+        try:
+            album = load_album(album_id)
+            if album and temp_track_id:
+                target = next((t for t in album['tracks'] if t['id'] == temp_track_id), None)
+                if target:
+                    target['title'] = "【初期化エラー】"
                     target['status'] = "error"
                     target['error_msg'] = str(e)
                     if 'processing' in target: del target['processing']
                     save_album(album)
-                    if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)):
-                        shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
-        
-        except Exception as e:
-            logging.critical(f"Spotify Critical Error: {e}")
-            try:
-                album = load_album(album_id)
-                if album and temp_track_id:
-                    target = next((t for t in album['tracks'] if t['id'] == temp_track_id), None)
-                    if target:
-                        target['title'] = "【初期化エラー】"
-                        target['status'] = "error"
-                        target['error_msg'] = str(e)
-                        if 'processing' in target: del target['processing']
-                        save_album(album)
-            except: pass
-        finally:
-            spotdl.utils.spotify.SpotifyClient._instance = None
+        except: pass
+    finally:
+        try:
             loop.close()
+        except: pass
 
 # --- API / Routes ---
 
@@ -579,6 +590,7 @@ def admin_add_track(artist_id, album_id):
             "id": str(uuid.uuid4()), "title": request.form.get('title') or file.filename,
             "track_number": int(tn), "filename": fname, "status": "completed", "source_type": "upload"
         })
+        alb['tracks'].sort(key=lambda x: x['track_number'])
         save_album(alb)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
@@ -598,6 +610,7 @@ def admin_add_track_url(artist_id, album_id):
         "id": tid, "title": "初期化中...", "track_number": tn, "filename": None,
         "processing": True, "status": "pending", "source_type": source, "original_url": url
     })
+    alb['tracks'].sort(key=lambda x: x['track_number'])
     save_album(alb)
 
     if source == 'spotify':
@@ -657,7 +670,8 @@ def admin_retry_all(artist_id, album_id):
         else:
             t = threading.Thread(target=background_youtube_process, args=(album_id, url, None, tn))
         t.start()
-        time.sleep(0.5)
+        # 連続実行時の負荷軽減
+        asyncio.run(asyncio.sleep(0.5))
 
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
@@ -669,6 +683,7 @@ def admin_edit_track(artist_id, album_id, track_id):
         t = next((x for x in alb['tracks'] if x['id'] == track_id), None)
         if t:
             t['title'] = request.form['title']; t['track_number'] = int(request.form['track_number'])
+            alb['tracks'].sort(key=lambda x: x['track_number'])
             save_album(alb)
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
