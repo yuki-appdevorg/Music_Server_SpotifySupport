@@ -36,7 +36,6 @@
             </div>
         </div>
 
-        <!-- 一括再試行ボタン (エラーがある場合のみ表示) -->
         {% set error_count = album.tracks | selectattr("status", "equalto", "error") | list | length %}
         {% if error_count > 0 %}
         <div class="alert alert-warning d-flex justify-content-between align-items-center">
@@ -49,7 +48,6 @@
 
         <div class="row g-4">
             <div class="col-lg-4 order-lg-2">
-                <!-- File Upload -->
                 <div class="card mb-3 border-0 shadow-sm">
                     <div class="card-header bg-success text-white">
                         <h6 class="mb-0"><i class="fas fa-file-upload me-2"></i>ファイルから追加</h6>
@@ -73,7 +71,6 @@
                     </div>
                 </div>
 
-                <!-- YouTube Import -->
                 <div class="card mb-3 border-0 shadow-sm">
                     <div class="card-header bg-danger text-white">
                         <h6 class="mb-0"><i class="fab fa-youtube me-2"></i>YouTubeからインポート</h6>
@@ -91,13 +88,9 @@
                                 <button class="btn btn-danger btn-sm w-100">ダウンロード開始</button>
                             </div>
                         </form>
-                        <div class="alert alert-light border mt-2 mb-0 p-2 small text-muted">
-                            <i class="fas fa-info-circle me-1"></i> 最高音質(320k)で保存
-                        </div>
                     </div>
                 </div>
 
-                <!-- Spotify Import -->
                 <div class="card border-0 shadow-sm">
                     <div class="card-header bg-success text-white" style="background-color: #1DB954 !important;">
                         <h6 class="mb-0"><i class="fab fa-spotify me-2"></i>Spotifyからインポート</h6>
@@ -109,15 +102,12 @@
                                 <input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}">
                             </div>
                             <div class="col-9">
-                                <input type="url" name="url" class="form-control form-control-sm" placeholder="Track / Album / Playlist URL..." required>
+                                <input type="url" name="url" class="form-control form-control-sm" placeholder="Track / Album / Playlist..." required>
                             </div>
                             <div class="col-12 mt-2">
                                 <button class="btn btn-success btn-sm w-100" style="background-color: #1DB954; border:none;">ダウンロード開始</button>
                             </div>
                         </form>
-                        <div class="alert alert-light border mt-2 mb-0 p-2 small text-muted">
-                            <i class="fas fa-info-circle me-1"></i> メタデータ含め320kで保存
-                        </div>
                     </div>
                 </div>
             </div>
@@ -137,7 +127,7 @@
                                 {% if track.status == 'downloading' or track.status == 'pending' %}
                                     <div class="text-primary small mt-1">
                                         <div class="spinner-border spinner-border-sm me-1" role="status"></div>
-                                        処理中... (更新して確認)
+                                        処理中...
                                     </div>
                                 {% elif track.status == 'error' %}
                                     <div class="text-danger small mt-1">
@@ -164,16 +154,14 @@
                             </form>
                             {% endif %}
 
-                            {% if track.status == 'completed' or track.status == 'error' %}
+                            <!-- Delete and Edit buttons are always visible now -->
                             <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editTrack{{ track.id }}"><i class="fas fa-pen"></i></button>
                             <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/delete" method="post" onsubmit="return confirm('削除しますか？');">
                                 <button class="btn btn-sm btn-outline-danger"><i class="fas fa-trash"></i></button>
                             </form>
-                            {% endif %}
                         </div>
                     </div>
 
-                    {% if track.status != 'downloading' and track.status != 'pending' %}
                     <div class="modal fade" id="editTrack{{ track.id }}" tabindex="-1">
                         <div class="modal-dialog">
                             <form class="modal-content" action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/edit" method="post">
@@ -191,7 +179,6 @@
                             </form>
                         </div>
                     </div>
-                    {% endif %}
                     {% else %}
                     <div class="list-group-item text-center text-muted py-4">まだ曲がありません。</div>
                     {% endfor %}
