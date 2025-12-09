@@ -13,6 +13,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_cors import CORS
 import yt_dlp
 from spotdl import Spotdl
+from spotdl.download.downloader import Downloader
 
 app = Flask(__name__)
 CORS(app)
@@ -88,6 +89,20 @@ def load_spotify_keys():
 
 load_spotify_keys()
 
+# --- Global SpotDL Client (検索用) ---
+# アプリ起動時に一度だけ初期化することで「Already initialized」エラーを防ぐ
+spotify_search_client = None
+if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+    try:
+        spotify_search_client = Spotdl(
+            client_id=SPOTIFY_CLIENT_ID, 
+            client_secret=SPOTIFY_CLIENT_SECRET, 
+            user_auth=False, 
+            headless=True
+        )
+    except Exception as e:
+        logging.error(f"Failed to initialize global SpotDL client: {e}")
+
 # --- 認証・ヘルパー関数 ---
 
 def check_auth(username, password):
@@ -143,7 +158,7 @@ def load_album(album_id):
 
 def save_album(data):
     path = os.path.join(app.config['ALBUMS_FOLDER'], f"{data['id']}.json")
-    # 【修正】保存時に必ずトラック番号順にソートする
+    # 【重要】保存時に必ず数値としてソートする
     if 'tracks' in data:
         data['tracks'].sort(key=lambda x: int(x.get('track_number', 0)))
     with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
@@ -225,7 +240,7 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
             video_url = entry.get('url') or entry.get('webpage_url')
             
             placeholder = {
-                "id": track_id, "title": f"【待機中】 {title}", "track_number": current_num,
+                "id": track_id, "title": f"【待機中】 {title}", "track_number": int(current_num),
                 "filename": None, "processing": True, "status": "pending",
                 "source_type": "youtube", "original_url": video_url
             }
@@ -300,20 +315,12 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
 
     logging.info(f"Start Spotify DL: {url}")
     try:
-        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-            raise Exception("Spotify Client ID/Secretが設定されていません。")
-
-        # 【重要】このループ専用のSpotdlインスタンスを作成する
-        spotdl = Spotdl(
-            client_id=SPOTIFY_CLIENT_ID, 
-            client_secret=SPOTIFY_CLIENT_SECRET, 
-            user_auth=False, 
-            headless=True,
-            loop=loop  # ループを明示的に渡す
-        )
+        if not spotify_search_client:
+            raise Exception("Spotify Client is not initialized. Check spotify_key.txt")
         
         try:
-            songs = spotdl.search([url])
+            # 検索にはグローバルのクライアントを使用（スレッドセーフな同期メソッドとして使用）
+            songs = spotify_search_client.search([url])
         except Exception as e:
             raise Exception(f"Search failed: {e}")
 
@@ -339,8 +346,16 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
             download_queue.append((placeholder, song))
             current_num += 1
         
-        save_album(album) # ここでソートされる
+        save_album(album)
 
+        # ダウンロード用の設定
+        dl_settings = {
+            "headless": True,
+            "simple_tui": True,
+            "audio_providers": ["youtube-music", "youtube"], # 音源ソース指定
+        }
+
+        # ダウンロードループ
         for item_dict, song_obj in download_queue:
             album = load_album(album_id)
             if not album: break
@@ -356,11 +371,15 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
                 if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
                 
-                spotdl.downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
+                # 【重要】このスレッドのループを使う新しいDownloaderを作成
+                downloader = Downloader(settings=dl_settings, loop=loop)
+                downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
                 
-                result = spotdl.download(song_obj)
+                # ダウンロード実行
+                result = downloader.download_song(song_obj)
                 
                 if result:
+                    # spotdl v4.2+ では (song, path) を返す
                     if isinstance(result, tuple):
                         _, path_obj = result
                         dl_file = str(path_obj)
@@ -384,7 +403,7 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                     save_album(album)
                     logging.info(f"Spotify DL Success: {song_obj.name}")
                 else:
-                    raise Exception("No file returned")
+                    raise Exception("No file returned from downloader")
 
             except Exception as e:
                 logging.error(f"Spotify DL Error ({song_obj.name}): {e}")
