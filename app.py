@@ -90,7 +90,6 @@ def load_spotify_keys():
 load_spotify_keys()
 
 # --- Global SpotDL Client (検索用) ---
-# アプリ起動時に一度だけ初期化することで「Already initialized」エラーを防ぐ
 spotify_search_client = None
 if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
     try:
@@ -158,7 +157,7 @@ def load_album(album_id):
 
 def save_album(data):
     path = os.path.join(app.config['ALBUMS_FOLDER'], f"{data['id']}.json")
-    # 【重要】保存時に必ず数値としてソートする
+    # 保存時に必ず数値としてソートする
     if 'tracks' in data:
         data['tracks'].sort(key=lambda x: int(x.get('track_number', 0)))
     with open(path, 'w', encoding='utf-8') as f: json.dump(data, f, indent=4, ensure_ascii=False)
@@ -309,7 +308,6 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 # --- バックグラウンド処理 (Spotify) ---
 
 def background_spotify_process(album_id, url, temp_track_id, start_track_num):
-    # 【重要】スレッドごとに新しいイベントループを作成
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -319,8 +317,12 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
             raise Exception("Spotify Client is not initialized. Check spotify_key.txt")
         
         try:
-            # 検索にはグローバルのクライアントを使用（スレッドセーフな同期メソッドとして使用）
             songs = spotify_search_client.search([url])
+            
+            # 【重要】検索結果を「ディスク番号」->「トラック番号」の順でソートして
+            # アルバムの曲順を保証する
+            songs.sort(key=lambda s: (s.disc_number or 0, s.track_number or 0))
+            
         except Exception as e:
             raise Exception(f"Search failed: {e}")
 
@@ -348,14 +350,12 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
         
         save_album(album)
 
-        # ダウンロード用の設定
         dl_settings = {
             "headless": True,
             "simple_tui": True,
-            "audio_providers": ["youtube-music", "youtube"], # 音源ソース指定
+            "audio_providers": ["youtube-music", "youtube"],
         }
 
-        # ダウンロードループ
         for item_dict, song_obj in download_queue:
             album = load_album(album_id)
             if not album: break
@@ -371,15 +371,12 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
                 temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
                 if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
                 
-                # 【重要】このスレッドのループを使う新しいDownloaderを作成
                 downloader = Downloader(settings=dl_settings, loop=loop)
                 downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
                 
-                # ダウンロード実行
                 result = downloader.download_song(song_obj)
                 
                 if result:
-                    # spotdl v4.2+ では (song, path) を返す
                     if isinstance(result, tuple):
                         _, path_obj = result
                         dl_file = str(path_obj)
