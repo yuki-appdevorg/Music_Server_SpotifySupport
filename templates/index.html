@@ -33,54 +33,41 @@
             </a>
         </div>
 
-        <div class="row mb-5 g-4">
-            <!-- Add Artist Manually -->
-            <div class="col-lg-7">
-                <div class="card border-0 shadow-sm h-100">
+        <div class="row g-4 mb-5">
+            <!-- Add Manual -->
+            <div class="col-lg-6">
+                <div class="card h-100 border-0 shadow-sm">
                     <div class="card-header bg-white py-3">
                         <h5 class="mb-0 fw-bold text-primary"><i class="fas fa-plus-circle me-2"></i>手動で追加</h5>
                     </div>
                     <div class="card-body">
                         <form action="/admin/artist/add" method="post" enctype="multipart/form-data" class="row g-3 align-items-end">
-                            <div class="col-md-4">
-                                <label class="form-label small text-muted">名前 <span class="text-danger">*</span></label>
-                                <input type="text" name="name" class="form-control" required placeholder="例: Official髭男dism">
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label small text-muted">ジャンル</label>
-                                <input type="text" name="genre" class="form-control" placeholder="例: J-Pop">
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label small text-muted">画像</label>
-                                <input type="file" name="image" class="form-control" accept="image/*">
-                            </div>
-                            <div class="col-md-2">
-                                <button class="btn btn-primary w-100"><i class="fas fa-plus"></i></button>
-                            </div>
+                            <div class="col-md-6"><label class="small text-muted">名前 *</label><input type="text" name="name" class="form-control" required></div>
+                            <div class="col-md-6"><label class="small text-muted">ジャンル</label><input type="text" name="genre" class="form-control"></div>
+                            <div class="col-md-12"><label class="small text-muted">画像</label><input type="file" name="image" class="form-control" accept="image/*"></div>
+                            <div class="col-md-12"><button class="btn btn-primary w-100">作成</button></div>
                         </form>
                     </div>
                 </div>
             </div>
 
-            <!-- Auto Import from Spotify -->
-            <div class="col-lg-5">
-                <div class="card border-0 shadow-sm h-100">
-                    <div class="card-header bg-success text-white py-3" style="background-color: #1DB954 !important;">
+            <!-- Import Spotify Artist -->
+            <div class="col-lg-6">
+                <div class="card h-100 border-0 shadow-sm">
+                    <div class="card-header bg-success text-white" style="background-color: #1DB954 !important;">
                         <h5 class="mb-0 fw-bold"><i class="fab fa-spotify me-2"></i>Spotifyから一括インポート</h5>
                     </div>
                     <div class="card-body">
-                        <form action="/admin/artist/import" method="post" class="row g-2 align-items-end">
-                            <div class="col-9">
-                                <label class="form-label small text-muted">アーティストURL</label>
-                                <input type="url" name="url" class="form-control" required placeholder="https://open.spotify.com/artist/...">
+                        <form action="/admin/artist/import" method="post">
+                            <div class="mb-3">
+                                <label class="form-label small text-muted">Spotify Artist URL</label>
+                                <input type="url" name="url" class="form-control" placeholder="https://open.spotify.com/artist/..." required>
                             </div>
-                            <div class="col-3">
-                                <button class="btn btn-success w-100" style="background-color: #1DB954; border:none;">開始</button>
+                            <div class="alert alert-light border small text-muted p-2">
+                                <i class="fas fa-info-circle me-1"></i> アーティスト情報、全アルバム、全曲を自動で取得・ダウンロードします。時間がかかります。
                             </div>
+                            <button class="btn btn-success w-100" style="background-color: #1DB954; border:none;">インポート開始</button>
                         </form>
-                        <p class="small text-muted mt-2 mb-0">
-                            ※ 全アルバム・シングルを取得し、バックグラウンドでダウンロードします。時間がかかります。
-                        </p>
                     </div>
                 </div>
             </div>
@@ -148,6 +135,7 @@
         </div>
     </div>
 
+    <!-- Help Modal -->
     <div class="modal fade" id="helpModal" tabindex="-1">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
@@ -156,14 +144,11 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
-                    <h6>1. アーティストの管理</h6>
-                    <ul class="small text-muted">
-                        <li><strong>手動追加:</strong> 名前と画像を指定して空のアーティストを作成します。</li>
-                        <li><strong>Spotify一括インポート:</strong> アーティストURLを入力すると、名前・画像・全アルバム・全曲を自動で取得・ダウンロードします（推奨）。</li>
-                    </ul>
+                    <h6>1. アーティスト一括インポート</h6>
+                    <p class="small text-muted">SpotifyのアーティストページURLを入力すると、すべてのアルバムと曲を自動で取り込みます。時間がかかるため、バックグラウンドで処理されます。</p>
                     <hr>
-                    <h6>2. アルバム・曲の管理</h6>
-                    <p class="small text-muted">アーティスト詳細画面から個別にアルバムを追加したり、曲をアップロードできます。</p>
+                    <h6>2. 手動管理</h6>
+                    <p class="small text-muted">手動でアーティストを作成し、アルバムを追加、曲をアップロードすることも可能です。</p>
                 </div>
             </div>
         </div>
