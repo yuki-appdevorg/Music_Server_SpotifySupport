@@ -33,32 +33,56 @@
             </a>
         </div>
 
-        <div class="card mb-5 border-0 shadow-sm">
-            <div class="card-header bg-white py-3">
-                <h5 class="mb-0 fw-bold text-primary"><i class="fas fa-plus-circle me-2"></i>新規アーティスト追加</h5>
+        <div class="row mb-5 g-4">
+            <!-- Add Artist Manually -->
+            <div class="col-lg-7">
+                <div class="card border-0 shadow-sm h-100">
+                    <div class="card-header bg-white py-3">
+                        <h5 class="mb-0 fw-bold text-primary"><i class="fas fa-plus-circle me-2"></i>手動で追加</h5>
+                    </div>
+                    <div class="card-body">
+                        <form action="/admin/artist/add" method="post" enctype="multipart/form-data" class="row g-3 align-items-end">
+                            <div class="col-md-4">
+                                <label class="form-label small text-muted">名前 <span class="text-danger">*</span></label>
+                                <input type="text" name="name" class="form-control" required placeholder="例: Official髭男dism">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small text-muted">ジャンル</label>
+                                <input type="text" name="genre" class="form-control" placeholder="例: J-Pop">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small text-muted">画像</label>
+                                <input type="file" name="image" class="form-control" accept="image/*">
+                            </div>
+                            <div class="col-md-2">
+                                <button class="btn btn-primary w-100"><i class="fas fa-plus"></i></button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
-            <div class="card-body">
-                <form action="/admin/artist/add" method="post" enctype="multipart/form-data" class="row g-3 align-items-end">
-                    <div class="col-md-3">
-                        <label class="form-label small text-muted">アーティスト名 <span class="text-danger">*</span></label>
-                        <input type="text" name="name" class="form-control" required placeholder="例: Official髭男dism">
+
+            <!-- Auto Import from Spotify -->
+            <div class="col-lg-5">
+                <div class="card border-0 shadow-sm h-100">
+                    <div class="card-header bg-success text-white py-3" style="background-color: #1DB954 !important;">
+                        <h5 class="mb-0 fw-bold"><i class="fab fa-spotify me-2"></i>Spotifyから一括インポート</h5>
                     </div>
-                    <div class="col-md-2">
-                        <label class="form-label small text-muted">ジャンル</label>
-                        <input type="text" name="genre" class="form-control" placeholder="例: J-Pop">
+                    <div class="card-body">
+                        <form action="/admin/artist/import" method="post" class="row g-2 align-items-end">
+                            <div class="col-9">
+                                <label class="form-label small text-muted">アーティストURL</label>
+                                <input type="url" name="url" class="form-control" required placeholder="https://open.spotify.com/artist/...">
+                            </div>
+                            <div class="col-3">
+                                <button class="btn btn-success w-100" style="background-color: #1DB954; border:none;">開始</button>
+                            </div>
+                        </form>
+                        <p class="small text-muted mt-2 mb-0">
+                            ※ 全アルバム・シングルを取得し、バックグラウンドでダウンロードします。時間がかかります。
+                        </p>
                     </div>
-                    <div class="col-md-3">
-                        <label class="form-label small text-muted">説明</label>
-                        <input type="text" name="description" class="form-control" placeholder="メモなど">
-                    </div>
-                    <div class="col-md-3">
-                        <label class="form-label small text-muted">画像</label>
-                        <input type="file" name="image" class="form-control" accept="image/*">
-                    </div>
-                    <div class="col-md-1">
-                        <button class="btn btn-primary w-100"><i class="fas fa-plus"></i></button>
-                    </div>
-                </form>
+                </div>
             </div>
         </div>
 
@@ -132,15 +156,14 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
-                    <h6>1. 音質について</h6>
-                    <p class="small text-muted">すべてのアップロード・インポートは自動的に最高音質（MP3 320kbps）に変換・統一されます。</p>
-                    <hr>
-                    <h6>2. アルバム・曲の追加</h6>
-                    <p class="small text-muted">アーティスト詳細画面からアルバムを追加し、その中で曲を管理します。</p>
+                    <h6>1. アーティストの管理</h6>
                     <ul class="small text-muted">
-                        <li><strong>ファイルアップロード:</strong> 動画ファイル(mp4等)も音声のみ抽出して登録可能です。</li>
-                        <li><strong>URLインポート:</strong> YouTube等のURLから最高音質でダウンロードします。</li>
+                        <li><strong>手動追加:</strong> 名前と画像を指定して空のアーティストを作成します。</li>
+                        <li><strong>Spotify一括インポート:</strong> アーティストURLを入力すると、名前・画像・全アルバム・全曲を自動で取得・ダウンロードします（推奨）。</li>
                     </ul>
+                    <hr>
+                    <h6>2. アルバム・曲の管理</h6>
+                    <p class="small text-muted">アーティスト詳細画面から個別にアルバムを追加したり、曲をアップロードできます。</p>
                 </div>
             </div>
         </div>
