@@ -6,7 +6,7 @@ import subprocess
 import shutil
 import logging
 import asyncio
-import requests # 画像保存用
+import requests
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, send_from_directory, jsonify, Response, session
 from werkzeug.utils import secure_filename
@@ -69,10 +69,10 @@ if not os.path.exists(app.config['INDEX_FILE']):
     with open(app.config['INDEX_FILE'], 'w', encoding='utf-8') as f:
         json.dump([], f)
 
-# --- Spotify APIキー読み込み & Spotipyクライアント初期化 ---
+# --- Spotify APIキー読み込み ---
 SPOTIFY_CLIENT_ID = None
 SPOTIFY_CLIENT_SECRET = None
-sp_client = None # Spotipy (Metadata用)
+sp_client = None
 
 def load_spotify_keys():
     global SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, sp_client
@@ -83,7 +83,6 @@ def load_spotify_keys():
                 if len(lines) >= 2:
                     SPOTIFY_CLIENT_ID = lines[0].strip()
                     SPOTIFY_CLIENT_SECRET = lines[1].strip()
-                    # Spotipyクライアントの初期化（メタデータ取得用）
                     auth_manager = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
                     sp_client = spotipy.Spotify(auth_manager=auth_manager)
                     logging.info("Spotify keys loaded & Spotipy initialized.")
@@ -96,7 +95,7 @@ def load_spotify_keys():
 
 load_spotify_keys()
 
-# --- SpotDL Client Singleton (検索用) ---
+# --- Global SpotDL Client (検索用) ---
 spotify_search_client = None
 if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
     try:
@@ -200,7 +199,6 @@ def save_image_file(file):
     return None
 
 def download_image_from_url(url):
-    """URLから画像をダウンロードして保存"""
     try:
         resp = requests.get(url, stream=True)
         if resp.status_code == 200:
@@ -231,34 +229,27 @@ def process_upload_file(file):
     if os.path.exists(temp_path): os.remove(temp_path)
     return final_filename
 
-# --- 共通：Spotifyダウンロードロジック (関数化) ---
+# --- 共通：Spotify/YouTube DL ロジック ---
 
 def process_album_download_logic(album_id, url, temp_track_id, start_track_num, loop):
-    """
-    指定されたアルバムにURLから曲を追加・ダウンロードするロジック
-    ループ内で呼び出すために分離
-    """
+    """アルバム一括ダウンロード用"""
     logging.info(f"Start Processing Album Download: {album_id} - {url}")
-    
-    # 検索 (Metadata)
     try:
         songs = spotify_search_client.search([url])
         songs.sort(key=lambda s: (s.disc_number or 0, s.track_number or 0))
     except Exception as e:
         logging.error(f"Search failed for {url}: {e}")
-        return # 検索失敗したら終了
+        return
 
     album = load_album(album_id)
     if not album: return
 
-    # 仮トラック削除
     if temp_track_id:
         album['tracks'] = [t for t in album['tracks'] if t['id'] != temp_track_id]
 
     download_queue = []
     current_num = start_track_num
 
-    # プレースホルダー作成
     for song in songs:
         track_id = str(uuid.uuid4())
         song_title = song.name
@@ -273,20 +264,12 @@ def process_album_download_logic(album_id, url, temp_track_id, start_track_num, 
     
     save_album(album)
 
-    # ダウンローダー設定
-    dl_settings = {
-        "headless": True, "simple_tui": True,
-        "audio_providers": ["youtube-music", "youtube"],
-    }
+    dl_settings = { "headless": True, "simple_tui": True, "audio_providers": ["youtube-music", "youtube"] }
 
-    # ダウンロード実行
     for item_dict, song_obj in download_queue:
-        # 最新状態リロード
         album = load_album(album_id)
         if not album: break
-        
         target = next((t for t in album['tracks'] if t['id'] == item_dict['id']), None)
-        # 強制削除されていたらスキップ
         if not target: continue
 
         target['title'] = f"【DL中...】 {song_obj.name}"
@@ -298,7 +281,6 @@ def process_album_download_logic(album_id, url, temp_track_id, start_track_num, 
             temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
             if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
             
-            # スレッド固有のループでダウンローダー作成
             downloader = Downloader(settings=dl_settings, loop=loop)
             downloader.settings["output"] = os.path.join(temp_dl_dir, "{artists} - {title}.{output-ext}")
             
@@ -308,11 +290,12 @@ def process_album_download_logic(album_id, url, temp_track_id, start_track_num, 
                 if isinstance(result, tuple): _, path_obj = result; dl_file = str(path_obj)
                 else: dl_file = str(result)
 
+                if not dl_file or dl_file == 'None' or not os.path.exists(dl_file):
+                    raise Exception("Download failed (File not found)")
+
                 final_path = os.path.join(app.config['MUSIC_FOLDER'], f"{base_id}.mp3")
-                
                 subprocess.run(['ffmpeg', '-y', '-i', dl_file, '-b:a', '320k', '-map', 'a', final_path],
                                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
                 if os.path.exists(temp_dl_dir): shutil.rmtree(temp_dl_dir)
 
                 target['title'] = song_obj.name
@@ -322,16 +305,119 @@ def process_album_download_logic(album_id, url, temp_track_id, start_track_num, 
                 save_album(album)
             else:
                 raise Exception("No file returned")
-
         except Exception as e:
-            logging.error(f"DL Error ({song_obj.name}): {e}")
+            logging.error(f"DL Error: {e}")
             target['title'] = f"【エラー】 {song_obj.name}"
             target['status'] = "error"
             target['error_msg'] = str(e)
             if 'processing' in target: del target['processing']
             save_album(album)
-            if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)):
-                shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
+            if os.path.exists(os.path.join(app.config['SPOTDL_TEMP'], base_id)): shutil.rmtree(os.path.join(app.config['SPOTDL_TEMP'], base_id))
+
+# --- 音声差し替え用バックグラウンド処理 ---
+
+def background_replace_process(album_id, track_id, url, source_type):
+    """
+    既存トラックの音声をURL(YouTube/Spotify)から再ダウンロードして差し替える
+    """
+    # イベントループ作成
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    logging.info(f"Start Replace Process: {url} (Type: {source_type})")
+    
+    try:
+        album = load_album(album_id)
+        if not album: return
+        target = next((t for t in album['tracks'] if t['id'] == track_id), None)
+        if not target: return
+
+        # 古いファイルを削除
+        if target.get('filename'):
+            old_path = os.path.join(app.config['MUSIC_FOLDER'], target['filename'])
+            if os.path.exists(old_path):
+                os.remove(old_path)
+                logging.info(f"Deleted old file: {old_path}")
+
+        # 新しいファイル名 (キャッシュ対策で新しいUUIDにする)
+        base_id = uuid.uuid4().hex
+        new_filename = f"{base_id}.mp3"
+        final_path = os.path.join(app.config['MUSIC_FOLDER'], new_filename)
+
+        # --- YouTube Download ---
+        if source_type == 'youtube':
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(app.config['MUSIC_FOLDER'], base_id), # 拡張子なしで指定
+                'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '320'}],
+                'quiet': True, 'ignoreerrors': True
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                dl_info = ydl.extract_info(url, download=True)
+                if not dl_info: raise Exception("Download failed")
+                # タイトルは任意で更新(今回は維持する方針だが、必要ならここで target['title'] = ... )
+            
+            # yt-dlpは自動で拡張子をつけるので確認
+            if not os.path.exists(final_path):
+                raise Exception("Converted file not found")
+
+        # --- Spotify Download ---
+        elif source_type == 'spotify':
+            spotdl = get_spotdl_instance() # 検索用
+            try:
+                songs = spotdl.search([url])
+                song_obj = songs[0] # 1曲のみ
+            except:
+                raise Exception("Spotify search failed")
+
+            temp_dl_dir = os.path.join(app.config['SPOTDL_TEMP'], base_id)
+            if not os.path.exists(temp_dl_dir): os.makedirs(temp_dl_dir)
+
+            dl_settings = { "headless": True, "simple_tui": True, "audio_providers": ["youtube-music", "youtube"] }
+            downloader = Downloader(settings=dl_settings, loop=loop)
+            downloader.settings["output"] = os.path.join(temp_dl_dir, "temp.{output-ext}")
+
+            result = downloader.download_song(song_obj)
+            
+            if result:
+                if isinstance(result, tuple): _, path_obj = result; dl_file = str(path_obj)
+                else: dl_file = str(result)
+
+                if not dl_file or dl_file == 'None' or not os.path.exists(dl_file):
+                    raise Exception("Download failed (File not found)")
+
+                subprocess.run(['ffmpeg', '-y', '-i', dl_file, '-b:a', '320k', '-map', 'a', final_path],
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(temp_dl_dir): shutil.rmtree(temp_dl_dir)
+            else:
+                raise Exception("No file returned from SpotDL")
+
+        # 完了処理
+        album = load_album(album_id) # 最新をリロード
+        target = next((t for t in album['tracks'] if t['id'] == track_id), None)
+        if target:
+            target['filename'] = new_filename
+            target['status'] = 'completed'
+            target['original_url'] = url
+            target['source_type'] = source_type
+            if 'processing' in target: del target['processing']
+            if 'error_msg' in target: del target['error_msg']
+            save_album(album)
+            logging.info(f"Replace Success: {target['title']}")
+
+    except Exception as e:
+        logging.error(f"Replace Error: {e}")
+        album = load_album(album_id)
+        target = next((t for t in album['tracks'] if t['id'] == track_id), None)
+        if target:
+            target['status'] = 'error'
+            target['error_msg'] = str(e)
+            target['title'] = f"【エラー】 {target['title'].replace('【処理中】 ', '').replace('【エラー】 ', '')}"
+            if 'processing' in target: del target['processing']
+            save_album(album)
+    finally:
+        try: loop.close()
+        except: pass
 
 # --- バックグラウンド処理 (単体アルバム/プレイリスト) ---
 
@@ -347,7 +433,7 @@ def background_spotify_process(album_id, url, temp_track_id, start_track_num):
         except: pass
 
 # --- バックグラウンド処理 (YouTube) ---
-# (前回と同様のため省略なしで記述)
+
 def background_youtube_process(album_id, url, temp_track_id, start_track_num):
     logging.info(f"Start YouTube DL: {url}")
     try:
@@ -426,9 +512,6 @@ def background_youtube_process(album_id, url, temp_track_id, start_track_num):
 # --- バックグラウンド処理 (アーティスト一括インポート) ---
 
 def background_artist_import_process(artist_url):
-    """
-    アーティストURLから全アルバム・シングルを取得し、構造を作成してDLを開始する
-    """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -436,18 +519,15 @@ def background_artist_import_process(artist_url):
     try:
         if not sp_client: raise Exception("Spotipy not initialized")
 
-        # 1. アーティスト情報取得
         results = sp_client.artist(artist_url)
         artist_name = results['name']
         artist_genres = ", ".join(results['genres'])
         artist_img_url = results['images'][0]['url'] if results['images'] else None
         
-        # 画像保存
         artist_img_filename = None
         if artist_img_url:
             artist_img_filename = download_image_from_url(artist_img_url)
 
-        # アーティスト作成
         artist_id = str(uuid.uuid4())
         new_artist = {
             "id": artist_id, "name": artist_name, "genre": artist_genres,
@@ -457,26 +537,20 @@ def background_artist_import_process(artist_url):
         save_artist(new_artist)
         logging.info(f"Artist Created: {artist_name}")
 
-        # 2. アルバム一覧取得 (Album, Single, Compilation)
-        # ページネーション対応は簡易的に省略（limit=50）
         albums_results = sp_client.artist_albums(artist_url, album_type='album,single', limit=50)
-        
-        processed_albums = [] # 重複チェック用
+        processed_albums = []
 
         for item in albums_results['items']:
             album_name = item['name']
-            # 同じ名前のアルバムはスキップ（例: Clean版とExplicit版など）
             if album_name in processed_albums: continue
             processed_albums.append(album_name)
 
             release_date = item['release_date']
             year = release_date.split('-')[0] if release_date else ""
             
-            # アルバムタイプ判定
-            raw_type = item['album_type'] # album or single
+            raw_type = item['album_type']
             total_tracks = item['total_tracks']
             
-            # シングルでも曲数が多い場合はEPとする簡易ロジック
             atype = 'Album'
             if raw_type == 'single':
                 if total_tracks > 1: atype = 'EP'
@@ -484,14 +558,11 @@ def background_artist_import_process(artist_url):
             elif raw_type == 'album':
                 atype = 'Album'
 
-            # ジャケット画像
             alb_img_url = item['images'][0]['url'] if item['images'] else None
             alb_img_filename = download_image_from_url(alb_img_url) if alb_img_url else None
 
-            # アルバム作成
             album_uuid = str(uuid.uuid4())
             
-            # アーティスト側の参照更新
             artist_data = load_artist(artist_id)
             artist_data['albums'].append({
                 "id": album_uuid, "title": album_name, "year": year, 
@@ -499,7 +570,6 @@ def background_artist_import_process(artist_url):
             })
             save_artist(artist_data)
 
-            # アルバム詳細作成
             new_album_detail = {
                 "id": album_uuid, "artist_id": artist_id, "artist_name": artist_name,
                 "title": album_name, "year": year, "type": atype,
@@ -509,14 +579,9 @@ def background_artist_import_process(artist_url):
             
             logging.info(f"Album Created: {album_name}")
 
-            # 3. アルバム内の曲をダウンロード (共通ロジック呼び出し)
-            # アルバムのSpotify URL
             alb_url = item['external_urls']['spotify']
-            
-            # ダウンロード処理（同期的、またはこのループ内で処理）
             process_album_download_logic(album_uuid, alb_url, None, 1, loop)
             
-            # 連続アクセス負荷軽減
             import time
             time.sleep(1)
 
@@ -586,17 +651,13 @@ def admin_add_artist():
     save_artist(new_artist)
     return redirect(url_for('admin_index'))
 
-# --- アーティスト一括インポート ---
 @app.route('/admin/artist/import', methods=['POST'])
 @requires_auth
 def admin_import_artist():
     url = request.form.get('url')
     if not url: return "URLが必要です", 400
-    
-    # バックグラウンド処理開始
     t = threading.Thread(target=background_artist_import_process, args=(url,))
     t.start()
-    
     return redirect(url_for('admin_index'))
 
 @app.route('/admin/artist/<artist_id>/edit', methods=['POST'])
@@ -702,6 +763,61 @@ def admin_add_track_url(artist_id, album_id):
     else:
         t = threading.Thread(target=background_youtube_process, args=(album_id, url, tid, tn))
     t.start()
+    return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
+
+# --- 音声差し替え: ファイルアップロード ---
+@app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/replace/file', methods=['POST'])
+@requires_auth
+def admin_replace_track_file(artist_id, album_id, track_id):
+    if 'file' not in request.files: return "No file", 400
+    file = request.files['file']
+    if not file.filename: return "No filename", 400
+    
+    # アップロードと変換
+    new_filename = process_upload_file(file)
+    if not new_filename: return "Convert Error", 500
+
+    alb = load_album(album_id)
+    if alb:
+        target = next((t for t in alb['tracks'] if t['id'] == track_id), None)
+        if target:
+            # 古いファイルの削除
+            if target.get('filename'):
+                old_path = os.path.join(app.config['MUSIC_FOLDER'], target['filename'])
+                if os.path.exists(old_path): os.remove(old_path)
+            
+            # データ更新
+            target['filename'] = new_filename
+            target['status'] = 'completed'
+            target['source_type'] = 'upload'
+            # エラー等クリア
+            if 'processing' in target: del target['processing']
+            if 'error_msg' in target: del target['error_msg']
+            
+            save_album(alb)
+            logging.info(f"Replace File Success: {target['title']}")
+
+    return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
+
+# --- 音声差し替え: URL (バックグラウンド) ---
+@app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/replace/url', methods=['POST'])
+@requires_auth
+def admin_replace_track_url(artist_id, album_id, track_id):
+    url = request.form.get('url')
+    source = request.form.get('source', 'youtube')
+    
+    alb = load_album(album_id)
+    if alb:
+        target = next((t for t in alb['tracks'] if t['id'] == track_id), None)
+        if target:
+            target['status'] = 'pending'
+            target['processing'] = True
+            target['title'] = f"【差し替え中】 {target.get('title', '').replace('【エラー】 ', '').replace('【差し替え中】 ', '')}"
+            save_album(alb)
+            
+            t = threading.Thread(target=background_replace_process, args=(album_id, track_id, url, source))
+            t.start()
+
     return redirect(url_for('admin_view_album', artist_id=artist_id, album_id=album_id))
 
 @app.route('/admin/artist/<artist_id>/album/<album_id>/track/<track_id>/retry', methods=['POST'])
