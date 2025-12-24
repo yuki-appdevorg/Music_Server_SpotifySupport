@@ -48,65 +48,37 @@
 
         <div class="row g-4">
             <div class="col-lg-4 order-lg-2">
+                <!-- Add Track Forms (省略なしで維持) -->
                 <div class="card mb-3 border-0 shadow-sm">
-                    <div class="card-header bg-success text-white">
-                        <h6 class="mb-0"><i class="fas fa-file-upload me-2"></i>ファイルから追加</h6>
-                    </div>
+                    <div class="card-header bg-success text-white"><h6 class="mb-0"><i class="fas fa-file-upload me-2"></i>ファイルから追加</h6></div>
                     <div class="card-body">
                         <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/add" method="post" enctype="multipart/form-data" class="row g-2">
-                            <div class="col-3">
-                                <input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}">
-                            </div>
-                            <div class="col-9">
-                                <input type="text" name="title" class="form-control form-control-sm" placeholder="曲名 (任意)">
-                            </div>
-                            <div class="col-12">
-                                <input type="file" name="file" class="form-control form-control-sm" required accept=".mp3,.wav,.m4a,.aac,.flac,.mp4,.mov,.webm,.mkv,audio/*,video/*">
-                                <div class="form-text small">※ mp4等はmp3(320k)に自動変換</div>
-                            </div>
-                            <div class="col-12 mt-2">
-                                <button class="btn btn-success btn-sm w-100">アップロード</button>
-                            </div>
+                            <div class="col-3"><input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}"></div>
+                            <div class="col-9"><input type="text" name="title" class="form-control form-control-sm" placeholder="曲名 (任意)"></div>
+                            <div class="col-12"><input type="file" name="file" class="form-control form-control-sm" required accept=".mp3,.wav,.m4a,.aac,.flac,.mp4,.mov,.webm,.mkv,audio/*,video/*"></div>
+                            <div class="col-12 mt-2"><button class="btn btn-success btn-sm w-100">アップロード</button></div>
                         </form>
                     </div>
                 </div>
-
                 <div class="card mb-3 border-0 shadow-sm">
-                    <div class="card-header bg-danger text-white">
-                        <h6 class="mb-0"><i class="fab fa-youtube me-2"></i>YouTubeからインポート</h6>
-                    </div>
+                    <div class="card-header bg-danger text-white"><h6 class="mb-0"><i class="fab fa-youtube me-2"></i>YouTubeからインポート</h6></div>
                     <div class="card-body">
                         <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/add_url" method="post" class="row g-2">
                             <input type="hidden" name="source" value="youtube">
-                            <div class="col-3">
-                                <input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}">
-                            </div>
-                            <div class="col-9">
-                                <input type="url" name="url" class="form-control form-control-sm" placeholder="URL / Playlist..." required>
-                            </div>
-                            <div class="col-12 mt-2">
-                                <button class="btn btn-danger btn-sm w-100">ダウンロード開始</button>
-                            </div>
+                            <div class="col-3"><input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}"></div>
+                            <div class="col-9"><input type="url" name="url" class="form-control form-control-sm" placeholder="URL..." required></div>
+                            <div class="col-12 mt-2"><button class="btn btn-danger btn-sm w-100">ダウンロード開始</button></div>
                         </form>
                     </div>
                 </div>
-
                 <div class="card border-0 shadow-sm">
-                    <div class="card-header bg-success text-white" style="background-color: #1DB954 !important;">
-                        <h6 class="mb-0"><i class="fab fa-spotify me-2"></i>Spotifyからインポート</h6>
-                    </div>
+                    <div class="card-header bg-success text-white" style="background-color: #1DB954 !important;"><h6 class="mb-0"><i class="fab fa-spotify me-2"></i>Spotifyからインポート</h6></div>
                     <div class="card-body">
                         <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/add_url" method="post" class="row g-2">
                             <input type="hidden" name="source" value="spotify">
-                            <div class="col-3">
-                                <input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}">
-                            </div>
-                            <div class="col-9">
-                                <input type="url" name="url" class="form-control form-control-sm" placeholder="Track / Album / Playlist..." required>
-                            </div>
-                            <div class="col-12 mt-2">
-                                <button class="btn btn-success btn-sm w-100" style="background-color: #1DB954; border:none;">ダウンロード開始</button>
-                            </div>
+                            <div class="col-3"><input type="number" name="track_number" class="form-control form-control-sm" placeholder="#" value="{{ album.tracks|length + 1 }}"></div>
+                            <div class="col-9"><input type="url" name="url" class="form-control form-control-sm" placeholder="URL..." required></div>
+                            <div class="col-12 mt-2"><button class="btn btn-success btn-sm w-100" style="background-color: #1DB954; border:none;">ダウンロード開始</button></div>
                         </form>
                     </div>
                 </div>
@@ -137,24 +109,23 @@
                                     <div class="d-flex align-items-center gap-2 mt-1">
                                         <audio controls src="/stream/{{ track.filename }}" class="me-2" style="height: 24px; max-width: 200px;"></audio>
                                         <span class="badge bg-dark text-white border">320k</span>
-                                        {% if track.source_type == 'spotify' %}
-                                        <span class="badge bg-success border" style="background-color:#1DB954!important"><i class="fab fa-spotify"></i></span>
-                                        {% elif track.source_type == 'youtube' %}
-                                        <span class="badge bg-danger border"><i class="fab fa-youtube"></i></span>
-                                        {% endif %}
                                     </div>
                                 {% endif %}
                             </div>
                         </div>
                         
                         <div class="d-flex gap-2 ms-2 align-items-center">
+                            <!-- 差し替えボタン -->
+                            <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#replaceTrack{{ track.id }}" title="音源を差し替え">
+                                <i class="fas fa-exchange-alt"></i>
+                            </button>
+
                             {% if track.status == 'error' %}
                             <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/retry" method="post">
                                 <button class="btn btn-sm btn-outline-warning" title="再試行"><i class="fas fa-sync"></i></button>
                             </form>
                             {% endif %}
 
-                            <!-- Delete and Edit buttons are always visible now -->
                             <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editTrack{{ track.id }}"><i class="fas fa-pen"></i></button>
                             <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/delete" method="post" onsubmit="return confirm('削除しますか？');">
                                 <button class="btn btn-sm btn-outline-danger"><i class="fas fa-trash"></i></button>
@@ -162,6 +133,47 @@
                         </div>
                     </div>
 
+                    <!-- Replace Modal -->
+                    <div class="modal fade" id="replaceTrack{{ track.id }}" tabindex="-1">
+                        <div class="modal-dialog">
+                            <div class="modal-content">
+                                <div class="modal-header bg-primary text-white">
+                                    <h5 class="modal-title">音源の差し替え</h5>
+                                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <ul class="nav nav-tabs mb-3" role="tablist">
+                                        <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#repFile{{ track.id }}">ファイル</button></li>
+                                        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#repUrl{{ track.id }}">URL</button></li>
+                                    </ul>
+                                    <div class="tab-content">
+                                        <!-- File -->
+                                        <div class="tab-pane fade show active" id="repFile{{ track.id }}">
+                                            <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/replace/file" method="post" enctype="multipart/form-data">
+                                                <div class="mb-3"><input type="file" name="file" class="form-control" required accept=".mp3,.wav,.m4a,.aac,.flac,.mp4,.mov,.webm,.mkv,audio/*,video/*"></div>
+                                                <button class="btn btn-primary w-100">アップロードして差し替え</button>
+                                            </form>
+                                        </div>
+                                        <!-- URL -->
+                                        <div class="tab-pane fade" id="repUrl{{ track.id }}">
+                                            <form action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/replace/url" method="post">
+                                                <div class="mb-3">
+                                                    <select name="source" class="form-select mb-2">
+                                                        <option value="youtube">YouTube</option>
+                                                        <option value="spotify">Spotify</option>
+                                                    </select>
+                                                    <input type="url" name="url" class="form-control" placeholder="URL..." required>
+                                                </div>
+                                                <button class="btn btn-primary w-100">ダウンロードして差し替え</button>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Edit Modal -->
                     <div class="modal fade" id="editTrack{{ track.id }}" tabindex="-1">
                         <div class="modal-dialog">
                             <form class="modal-content" action="/admin/artist/{{ artist.id }}/album/{{ album.id }}/track/{{ track.id }}/edit" method="post">
